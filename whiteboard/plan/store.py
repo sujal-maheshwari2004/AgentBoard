@@ -76,7 +76,6 @@ ServerMessage = dict[str, Any]
 
 CACHE_VERSION = 1
 DIAGRAM_NAME_RE = re.compile(r"^[a-z0-9][a-z0-9-]*$")
-NODE_DIR = Path("plan") / "nodes"
 _UNSET: Any = object()
 
 

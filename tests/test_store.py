@@ -6,7 +6,7 @@ import pytest
 from whiteboard.files.atomic import SelfWriteRegistry
 from whiteboard.files.frontmatter import split_frontmatter
 from whiteboard.mermaid import extract_mermaid_blocks, parse
-from whiteboard.plan.model import AgentCard, Node, PlanSnapshot, Skeleton
+from whiteboard.plan.model import AgentCard, PlanSnapshot, Skeleton
 from whiteboard.plan.store import OpsResult, PlanStore
 from whiteboard.scaffold import scaffold
 
