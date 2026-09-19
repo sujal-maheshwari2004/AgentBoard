@@ -158,7 +158,13 @@ class Hub:
 
     def broadcast(self, message: dict, exclude: Connection | WebSocket | int | None = None) -> int:
         """Queue ``message`` for every client except ``exclude``; returns the count."""
-        skip = exclude.id if isinstance(exclude, Connection) else (self.find(exclude).id if isinstance(exclude, WebSocket) and self.find(exclude) else exclude)
+        if isinstance(exclude, Connection):
+            skip: int | None = exclude.id
+        elif isinstance(exclude, int) or exclude is None:
+            skip = exclude
+        else:  # a websocket object (duck-typed so tests can pass fakes)
+            found = self.find(exclude)
+            skip = found.id if found is not None else None
         n = 0
         for conn in list(self._conns.values()):
             if conn.id == skip:
@@ -170,7 +176,7 @@ class Hub:
         return n
 
     # -- introspection ---------------------------------------------------------
-    def find(self, ws: WebSocket) -> Connection | None:
+    def find(self, ws: object) -> Connection | None:
         for conn in self._conns.values():
             if conn.ws is ws:
                 return conn

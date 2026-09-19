@@ -328,6 +328,13 @@ async def on_dispatch_reply(ctx: ServerContext, conn: Connection, msg: P.Dispatc
     )
     _ack(ctx, conn, msg.seq)
     if approved:
+        node = ctx.store.get_node(node_id) if node_id else None
+        if node is not None and agent_id and node.owner != agent_id:
+            try:
+                ctx.store.set_node_status(node_id, node.status, owner=agent_id)
+                ctx.bus.publish_messages(ctx.store.last_messages)
+            except ValueError as exc:
+                log.warning("could not set owner of %s to %s: %s", node_id, agent_id, exc)
         ctx.bus.push_root([
             f"dispatch approved: {node_id} → {agent_id} (spawn it now with subagent_type=whiteboard-task; "
             f"job spec: .whiteboard/agents/{agent_id}/plan.md)" + (f" — {_q(note)}" if note else "")

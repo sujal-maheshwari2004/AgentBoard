@@ -22,6 +22,7 @@ import logging.handlers
 import os
 import socket
 from collections.abc import AsyncIterator, Callable
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -58,8 +59,9 @@ code{background:#f3f3f3;padding:.1rem .3rem;border-radius:3px}</style></head>
 # --------------------------------------------------------------------------- logging
 class _JsonFormatter(logging.Formatter):
     def format(self, record: logging.LogRecord) -> str:
+        created = datetime.fromtimestamp(record.created, timezone.utc)
         entry: dict[str, Any] = {
-            "ts": self.formatTime(record, "%Y-%m-%dT%H:%M:%S") + f".{int(record.msecs):03d}Z",
+            "ts": created.strftime("%Y-%m-%dT%H:%M:%S") + f".{int(record.msecs):03d}Z",
             "level": record.levelname,
             "logger": record.name,
             "msg": record.getMessage(),
@@ -137,6 +139,9 @@ def create_app(root: Path, *, mcp_factory: Callable | None = None) -> FastAPI:
     """Build the server for ``root``. ``mcp_factory(store, log, bus, root) -> MCPServer``
     overrides the default ``whiteboard.mcp_server.build_mcp_server`` (tests)."""
     root = Path(root).resolve()
+    # Before the MCP factory: MCPServer.__init__ calls logging.basicConfig with a
+    # Rich console handler, which is a no-op once the root logger has ours.
+    setup_logging(root)
     ctx = ServerContext(root)
     dist = canvas_dist()
 

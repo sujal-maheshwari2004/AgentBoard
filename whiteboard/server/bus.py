@@ -48,8 +48,19 @@ class Bus:
         self.hub = hub
         self.bridge = bridge
         self.log = event_log
+        # Highest event seq already broadcast: the MCP layer publishes the events
+        # it appends itself, and the event pump sees them too; whichever comes
+        # first wins, the other is dropped here (seqs are monotonic per log).
+        self.last_event_seq = 0
 
     def publish(self, type: str, payload: Any, *, seq: int | None = None, exclude: Connection | None = None) -> int:
+        if type == "event.append":
+            ev_seq = seq if isinstance(seq, int) else (payload.get("seq") if isinstance(payload, dict) else None)
+            if isinstance(ev_seq, int):
+                if ev_seq <= self.last_event_seq:
+                    return 0
+                self.last_event_seq = ev_seq
+                seq = ev_seq
         return self.hub.broadcast(envelope(type, payload, seq=seq), exclude=exclude)
 
     def publish_event(self, event: Event) -> int:
