@@ -1,0 +1,20 @@
+flowchart TB
+    Outside[Outside all]
+    subgraph one [Group One]
+        direction LR
+        A1[First] --> A2[Second]
+        A3
+    end
+    subgraph two
+        B1 --> B2
+    end
+    subgraph Third group
+        C1[Third]
+    end
+    subgraph four ["Quoted (title)"]
+        D1
+    end
+    Outside --> A1
+    A2 --> B1
+    B2 --> C1
+    C1 --> D1

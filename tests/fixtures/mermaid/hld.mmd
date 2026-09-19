@@ -1,0 +1,20 @@
+flowchart TD
+    node-files[Files layer]
+    node-parser[Mermaid parser]
+    node-plan[Plan core]
+    node-store[PlanStore]
+    node-events[Event log]
+    node-server[Server + websocket]
+    node-mcp[MCP tools]
+    node-canvas[tldraw canvas]
+    node-cli[CLI + skill]
+    node-files --> node-parser
+    node-files --> node-plan
+    node-parser --> node-plan
+    node-plan --> node-store
+    node-files --> node-events
+    node-store --> node-server
+    node-events --> node-server
+    node-server --> node-mcp
+    node-server --> node-canvas
+    node-server --> node-cli

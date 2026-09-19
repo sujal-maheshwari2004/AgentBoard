@@ -1,0 +1,13 @@
+flowchart TD
+    A[Alpha]:::hot
+    B[Beta]
+    C[Gamma]
+    classDef hot fill:#f96,stroke:#333
+    classDef cold fill:#69f
+    class B,C cold
+    A --> B
+    style C fill:#bbf,stroke:#f66,stroke-width:2px
+    B --> C
+    linkStyle 0 stroke:#ff3,stroke-width:4px
+    click A "https://example.com" "Open"
+    click B callback "Tooltip"

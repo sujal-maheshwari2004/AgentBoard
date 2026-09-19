@@ -1,0 +1,12 @@
+flowchart TD
+    A["Service (v2)"]
+    B["Queue [primary]"]
+    C("He said #quot;hello#quot;")
+    D{"Decision? (yes/no)"}
+    E["Plain quoted"]
+    F[Unquoted plain]
+    G(["Stadium & co"])
+    A --> B --> C --> D
+    D -->|"yes (really)"| E
+    D -->|no| F
+    F -- "inline (quoted)" --> G
