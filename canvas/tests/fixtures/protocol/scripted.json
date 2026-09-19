@@ -1,0 +1,61 @@
+[
+  {
+    "delayMs": 1500,
+    "message": {
+      "type": "bridge.status",
+      "payload": { "ok": true, "failures": 0 }
+    }
+  },
+  {
+    "delayMs": 2500,
+    "message": {
+      "type": "event.append",
+      "event": true,
+      "payload": { "agent_id": "root", "node_id": "node-plan", "type": "info", "note": "dispatching plan core next", "notified": [], "data": {} }
+    }
+  },
+  {
+    "delayMs": 4000,
+    "message": {
+      "type": "plan.node.upsert",
+      "payload": {
+        "node": { "id": "node-plan", "type": "hld", "title": "Plan core", "status": "in_progress", "owner": "agent-plan", "depends_on": ["node-files"], "interfaces": [], "body": "" }
+      }
+    }
+  },
+  {
+    "delayMs": 4500,
+    "message": {
+      "type": "agent.card.upsert",
+      "payload": {
+        "agent": { "id": "agent-parser", "assigned_node": "node-parser", "status": "working", "claude_agent_ref": "parser-2", "ready_deps": ["node-files"], "spawned_at": "2026-09-20T00:05:00.000Z", "notes": "writing the tokenizer", "plan_md": "", "diagrams_md": "" }
+      }
+    }
+  },
+  {
+    "delayMs": 7000,
+    "message": {
+      "type": "needs_input",
+      "payload": {
+        "prompt_id": "p-9c1d",
+        "agent_id": "agent-parser",
+        "node_id": "node-parser",
+        "question": "Keep ELK out of the layout engine and use dagre only?",
+        "kind": "choice",
+        "choices": ["yes, dagre only", "no, add ELK", "let me think"]
+      }
+    }
+  },
+  {
+    "delayMs": 12000,
+    "message": {
+      "type": "dispatch.request",
+      "payload": {
+        "request_id": "d-3f2a",
+        "node_id": "node-canvas",
+        "agent_id": "agent-canvas",
+        "job_spec_md": "# Job: node-canvas — tldraw canvas\n\n## Goal\nRender the plan as shapes and send human edits back as semantic ops.\n\n## Depends on\n- node-plan (Plan core) — in_progress\n\n## Interfaces to honour\n- CONTRACTS §6 websocket protocol\n\nRead `.whiteboard/COLLABORATION.md` before acting."
+      }
+    }
+  }
+]
