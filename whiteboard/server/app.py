@@ -37,7 +37,7 @@ from whiteboard.server import api
 from whiteboard.server.bus import ServerContext
 from whiteboard.server.handlers import serve_websocket
 
-__all__ = ["create_app", "run_foreground", "setup_logging", "canvas_dist", "MISSING_CANVAS_HTML"]
+__all__ = ["create_app", "run_foreground", "setup_logging", "teardown_logging", "canvas_dist", "MISSING_CANVAS_HTML"]
 
 log = logging.getLogger(__name__)
 
@@ -93,6 +93,16 @@ def setup_logging(root: Path, level: int = logging.INFO) -> logging.Handler:
     for name in ("uvicorn", "uvicorn.error", "uvicorn.access", "mcp", "watchdog", "httpx2", "httpcore"):
         logging.getLogger(name).setLevel(logging.WARNING)
     return handler
+
+
+def teardown_logging(root: Path) -> None:
+    """Detach and close the handler installed by :func:`setup_logging` (lifespan end)."""
+    path = config.server_log_path(root)
+    key = str(path.resolve()) if path.parent.exists() else str(path)
+    handler = _LOG_HANDLERS.pop(key, None)
+    if handler is not None:
+        logging.getLogger().removeHandler(handler)
+        handler.close()
 
 
 # --------------------------------------------------------------------------- canvas
@@ -226,6 +236,7 @@ def create_app(root: Path, *, mcp_factory: Callable | None = None) -> FastAPI:
             with contextlib.suppress(Exception):
                 registry_update(str(root), None)
             log.info("whiteboard server down for %s", root)
+            teardown_logging(root)
 
     app = FastAPI(title=f"whiteboard: {ctx.project}", lifespan=lifespan, docs_url=None, redoc_url=None, openapi_url=None)
     app.state.ctx = ctx
