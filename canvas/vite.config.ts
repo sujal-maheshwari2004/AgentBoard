@@ -17,5 +17,5 @@ export default defineConfig({
       '/skeleton': { target: `http://127.0.0.1:${port}`, changeOrigin: true },
     },
   },
-  test: { environment: 'jsdom', globals: true },
+  test: { environment: 'jsdom', globals: true, setupFiles: ['./tests/setup.ts'] },
 })
