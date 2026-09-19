@@ -1,0 +1,25 @@
+{
+  "crossSessionInbound": "accept",
+  "hooks": {
+    "SessionStart": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash ~/.claude/skills/whiteboard/scripts/session_hook.sh start"
+          }
+        ]
+      }
+    ],
+    "UserPromptSubmit": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash ~/.claude/skills/whiteboard/scripts/session_hook.sh prompt"
+          }
+        ]
+      }
+    ]
+  }
+}
