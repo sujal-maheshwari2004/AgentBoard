@@ -256,6 +256,25 @@ def build_mcp_server(store: PlanStore, log: EventLog, bus: Bus, root: Path) -> M
         where = f" on {node_id}" if node_id else ""
         return f"needs_input (prompt {prompt_id}, {agent_id}{where}): {json.dumps(question)}"
 
+    def open_prompt(agent_id: str, question: str, node_id: str | None, kind: str, choices: list[str]):
+        """Create a prompt (this appends the needs_input event), broadcast it and
+        push a root line. Returns the needs_input Event."""
+        if not question or not question.strip():
+            raise WhiteboardToolError("question must not be empty")
+        prompt_id = log.create_prompt(agent_id, question, node_id=node_id, kind=kind, choices=choices)
+        ev = next(
+            e for e in reversed(log.read_since(log.latest_seq - 1))
+            if e.type == "needs_input" and e.data.get("prompt_id") == prompt_id
+        )
+        bus.publish("event.append", ev.model_dump(), seq=ev.seq)
+        bus.publish(
+            "needs_input",
+            {"prompt_id": prompt_id, "agent_id": agent_id, "node_id": node_id,
+             "question": question, "kind": kind, "choices": choices},
+        )
+        bus.push_root([prompt_line(prompt_id, agent_id, node_id, question)])
+        return ev
+
     def tool(fn: Callable[..., Awaitable[dict]]) -> Callable[..., Awaitable[dict]]:
         wrapped = _wrap_errors(fn)
         server.tool(name=fn.__name__)(wrapped)
@@ -442,20 +461,8 @@ def build_mcp_server(store: PlanStore, log: EventLog, bus: Bus, root: Path) -> M
             lines.append(f"{agent_id} blocked{where}: {note or '(no note)'}")
         elif type == "needs_input":
             kind = str(data.get("kind") or "text")
-            choices = list(data.get("choices") or [])
-            prompt_id = log.create_prompt(agent_id, note, node_id=node_id, kind=kind, choices=choices)
-            ev = next(
-                e for e in reversed(log.read_since(log.latest_seq - 1))
-                if e.type == "needs_input" and e.data.get("prompt_id") == prompt_id
-            )
-            bus.publish("event.append", ev.model_dump(), seq=ev.seq)
-            bus.publish(
-                "needs_input",
-                {"prompt_id": prompt_id, "agent_id": agent_id, "node_id": node_id,
-                 "question": note, "kind": kind, "choices": choices},
-            )
-            bus.push_root([prompt_line(prompt_id, agent_id, node_id, note)])
-            return ev.model_dump()
+            choices = [str(c) for c in (data.get("choices") or [])]
+            return open_prompt(agent_id, note, node_id, kind, choices).model_dump()
         else:
             where = f" on {node_id}" if node_id else ""
             to = data.get("to")
@@ -478,22 +485,8 @@ def build_mcp_server(store: PlanStore, log: EventLog, bus: Bus, root: Path) -> M
         check_event_agent(agent_id)
         if node_id is not None:
             need_node(node_id)
-        if not question or not question.strip():
-            raise WhiteboardToolError("question must not be empty")
-        choices = list(choices or [])
-        prompt_id = log.create_prompt(agent_id, question, node_id=node_id, kind=kind, choices=choices)
-        ev = next(
-            e for e in reversed(log.read_since(log.latest_seq - 1))
-            if e.type == "needs_input" and e.data.get("prompt_id") == prompt_id
-        )
-        bus.publish("event.append", ev.model_dump(), seq=ev.seq)
-        bus.publish(
-            "needs_input",
-            {"prompt_id": prompt_id, "agent_id": agent_id, "node_id": node_id,
-             "question": question, "kind": kind, "choices": choices},
-        )
-        bus.push_root([prompt_line(prompt_id, agent_id, node_id, question)])
-        return {"prompt_id": prompt_id}
+        ev = open_prompt(agent_id, question, node_id, kind, [str(c) for c in (choices or [])])
+        return {"prompt_id": ev.data["prompt_id"]}
 
     @tool
     async def get_reply(prompt_id: str) -> dict:
