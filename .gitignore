@@ -1,0 +1,15 @@
+.venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+*.egg-info/
+build/
+dist/
+!canvas/dist/
+canvas/node_modules/
+canvas/.vite/
+.DS_Store
+.whiteboard/server.json
+.whiteboard/server.log*
+.whiteboard/.cache/
+*.layout.json
