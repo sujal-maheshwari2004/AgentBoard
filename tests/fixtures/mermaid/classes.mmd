@@ -1,0 +1,10 @@
+flowchart LR
+    A[Alpha]:::primary
+    B:::secondary
+    C(Gamma):::primary
+    D
+    A --> B:::secondary --> C
+    C --> D:::tertiary
+    classDef primary fill:#f9f
+    classDef secondary fill:#9ff
+    classDef tertiary fill:#ff9

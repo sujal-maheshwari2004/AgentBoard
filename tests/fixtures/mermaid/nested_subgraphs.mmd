@@ -1,0 +1,10 @@
+flowchart TD
+    subgraph outer [Outer]
+        O1[In outer]
+        subgraph inner [Inner]
+            direction RL
+            I1[In inner] --> I2[Also inner]
+        end
+        O1 --> I1
+    end
+    X --> O1

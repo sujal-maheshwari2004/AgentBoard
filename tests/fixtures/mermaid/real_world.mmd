@@ -1,0 +1,16 @@
+flowchart TB
+    %% Request path
+    client([Browser]) -->|HTTP| lb[Load balancer]
+    lb --> api1[API pod 1]
+    lb --> api2[API pod 2]
+    api1 & api2 --> cache{{Redis}}
+    api1 & api2 --> db[(Postgres)]
+    subgraph workers [Background workers]
+        direction LR
+        q[[Queue]] --> w1(Worker) --> w2(Worker)
+    end
+    api1 -. enqueue .-> q
+    w2 ==>|writes| db
+    db --o audit[/Audit log/]
+    classDef store fill:#eef,stroke:#88f
+    class db,cache store

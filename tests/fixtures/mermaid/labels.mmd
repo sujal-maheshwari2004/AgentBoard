@@ -1,0 +1,15 @@
+flowchart TD
+    A -->|pipe label| B
+    B -- inline label --> C
+    C -. dotted inline .-> D
+    D == thick inline ==> E
+    E ---|solid none pipe| F
+    F -- solid none inline --- G
+    G -.-|dotted pipe| H
+    H ==>|thick pipe| I
+    I -- circle head --o J
+    J -- cross head --x K
+    K -->|"quoted (pipe)"| L
+    L -- "quoted [inline]" --> M
+    M -->| padded | N
+    N -->|two words|O

@@ -1,0 +1,4 @@
+graph LR
+    A(Client) --> B[Server]
+    B --> C[(Database)]
+    B -.->|cache miss| D{{Cache}}

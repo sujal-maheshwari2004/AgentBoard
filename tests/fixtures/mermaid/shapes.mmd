@@ -1,0 +1,20 @@
+flowchart TD
+    n_bare
+    n_rect[Rectangle]
+    n_round(Round edges)
+    n_stadium([Stadium])
+    n_sub[[Subroutine]]
+    n_cyl[(Cylinder)]
+    n_circle((Circle))
+    n_dcircle(((Double circle)))
+    n_asym>Asymmetric]
+    n_rhombus{Rhombus}
+    n_hex{{Hexagon}}
+    n_para[/Parallelogram/]
+    n_para_alt[\Parallelogram alt\]
+    n_trap[/Trapezoid\]
+    n_trap_alt[\Trapezoid alt/]
+    n_bare --> n_rect --> n_round --> n_stadium
+    n_sub --> n_cyl --> n_circle --> n_dcircle
+    n_asym --> n_rhombus --> n_hex --> n_para
+    n_para_alt --> n_trap --> n_trap_alt
