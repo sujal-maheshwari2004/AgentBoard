@@ -1,0 +1,341 @@
+#!/usr/bin/env node
+// Mock whiteboard server for canvas development (CONTRACTS §6).
+//   pnpm mock            → ws + static dist/ on MOCK_PORT (default 43999)
+//   WHITEBOARD_PORT=43999 pnpm dev   → vite proxies /ws to it
+// Replays tests/fixtures/protocol/snapshot.json on client.hello, then scripted.json
+// ({delayMs, message}[]), and answers client messages the way the real server would.
+import { createServer } from 'node:http'
+import { readFileSync, existsSync, statSync } from 'node:fs'
+import { join, extname, dirname } from 'node:path'
+import { fileURLToPath } from 'node:url'
+import { WebSocketServer } from 'ws'
+
+const here = dirname(fileURLToPath(import.meta.url))
+const PORT = Number(process.env.MOCK_PORT ?? 43999)
+const DIST = join(here, 'dist')
+const FIXTURES = join(here, 'tests', 'fixtures', 'protocol')
+
+const snapshotFixture = JSON.parse(readFileSync(join(FIXTURES, 'snapshot.json'), 'utf8'))
+const scripted = JSON.parse(readFileSync(join(FIXTURES, 'scripted.json'), 'utf8'))
+
+// ---- in-memory truth (mutated by client ops so re-connects see the latest state) ----
+const state = structuredClone(snapshotFixture)
+let eventSeq = 40
+const events = []
+const pendingRisky = new Map() // request_id -> {ops, forSeq, ws}
+
+const now = () => new Date().toISOString()
+const log = (...a) => console.log(new Date().toISOString().slice(11, 23), ...a)
+
+const MIME = {
+  '.html': 'text/html; charset=utf-8',
+  '.js': 'text/javascript; charset=utf-8',
+  '.mjs': 'text/javascript; charset=utf-8',
+  '.css': 'text/css; charset=utf-8',
+  '.json': 'application/json',
+  '.map': 'application/json',
+  '.svg': 'image/svg+xml',
+  '.png': 'image/png',
+  '.woff': 'font/woff',
+  '.woff2': 'font/woff2',
+  '.ico': 'image/x-icon',
+}
+
+const http = createServer((req, res) => {
+  const url = new URL(req.url ?? '/', 'http://localhost')
+  if (url.pathname === '/api/health') {
+    res.writeHead(200, { 'content-type': 'application/json' })
+    res.end(JSON.stringify({ ok: true, mock: true, rev: state.rev }))
+    return
+  }
+  if (!existsSync(DIST)) {
+    res.writeHead(503, { 'content-type': 'text/plain' })
+    res.end('canvas/dist missing: run `pnpm build`, or use `pnpm dev` with WHITEBOARD_PORT=' + PORT)
+    return
+  }
+  let file = join(DIST, url.pathname === '/' ? 'index.html' : url.pathname)
+  if (!file.startsWith(DIST) || !existsSync(file) || statSync(file).isDirectory()) file = join(DIST, 'index.html') // SPA fallback
+  res.writeHead(200, { 'content-type': MIME[extname(file)] ?? 'application/octet-stream' })
+  res.end(readFileSync(file))
+})
+
+const wss = new WebSocketServer({ server: http, path: '/ws' })
+
+const clients = new Set()
+
+function envelopeFor(client, type, payload, { event = false, replyTo = null } = {}) {
+  const seq = event ? ++eventSeq : ++client.counter
+  return { type, payload, seq, ts: now(), replyTo }
+}
+
+function sendTo(client, type, payload, opts) {
+  if (client.ws.readyState !== 1) return
+  const env = envelopeFor(client, type, payload, opts)
+  client.ws.send(JSON.stringify(env))
+  return env.seq
+}
+
+/** broadcast a non-event message to every client (each with its own counter) */
+function broadcast(type, payload) {
+  for (const c of clients) sendTo(c, type, payload)
+}
+
+/** append an event and broadcast it with the event seq */
+function appendEvent({ agent_id = 'server', node_id = null, type, note = '', notified = [], data = {} }) {
+  const ev = { seq: ++eventSeq, ts: now(), agent_id, node_id, type, note, notified, data }
+  events.push(ev)
+  for (const c of clients) {
+    if (c.ws.readyState !== 1) continue
+    c.ws.send(JSON.stringify({ type: 'event.append', payload: ev, seq: ev.seq, ts: ev.ts, replyTo: null }))
+  }
+  return ev
+}
+
+function snapshot() {
+  return structuredClone(state)
+}
+
+function findNode(id) {
+  return state.nodes.find((n) => n.id === id)
+}
+
+function applyOp(op) {
+  const diagram = op.diagram ?? 'hld'
+  switch (op.op) {
+    case 'renamed': {
+      const n = findNode(op.id)
+      if (!n) return
+      n.title = op.label
+      broadcast('plan.node.upsert', { node: n })
+      appendEvent({ agent_id: 'user', node_id: n.id, type: 'node_changed', note: `renamed to "${op.label}"` })
+      break
+    }
+    case 'node-created': {
+      if (findNode(op.id)) return
+      const n = { id: op.id, type: 'hld', title: op.label, status: 'todo', owner: null, depends_on: [], interfaces: [], body: '' }
+      state.nodes.push(n)
+      broadcast('plan.node.upsert', { node: n })
+      appendEvent({ agent_id: 'user', node_id: n.id, type: 'node_changed', note: 'created from canvas' })
+      break
+    }
+    case 'status-changed': {
+      const n = findNode(op.id)
+      if (!n) return
+      n.status = op.status
+      broadcast('plan.node.upsert', { node: n })
+      appendEvent({ agent_id: 'user', node_id: n.id, type: 'node_changed', note: `status → ${op.status}` })
+      break
+    }
+    case 'deleted': {
+      state.nodes = state.nodes.filter((n) => n.id !== op.id)
+      state.edges = state.edges.filter((e) => e.src !== op.id && e.dst !== op.id)
+      for (const n of state.nodes) n.depends_on = n.depends_on.filter((d) => d !== op.id)
+      broadcast('plan.node.delete', { id: op.id })
+      appendEvent({ agent_id: 'user', node_id: op.id, type: 'node_changed', note: 'deleted' })
+      break
+    }
+    case 'edge-created': {
+      if (!state.edges.some((e) => e.src === op.from && e.dst === op.to)) {
+        const e = { src: op.from, dst: op.to, label: op.label ?? null, diagram }
+        state.edges.push(e)
+        const dst = findNode(op.to)
+        if (dst && !dst.depends_on.includes(op.from)) dst.depends_on.push(op.from)
+        broadcast('plan.edge.upsert', { edge: e })
+        if (dst) broadcast('plan.node.upsert', { node: dst })
+      }
+      break
+    }
+    case 'edge-deleted': {
+      state.edges = state.edges.filter((e) => !(e.src === op.from && e.dst === op.to))
+      const dst = findNode(op.to)
+      if (dst) dst.depends_on = dst.depends_on.filter((d) => d !== op.from)
+      broadcast('plan.edge.delete', { src: op.from, dst: op.to, diagram })
+      if (dst) broadcast('plan.node.upsert', { node: dst })
+      break
+    }
+    case 'edge-rerouted': {
+      applyOp({ op: 'edge-deleted', from: op.from, to: op.to, diagram })
+      applyOp({ op: 'edge-created', from: op.new_from, to: op.new_to, diagram })
+      break
+    }
+    default:
+      log('unknown op', op)
+  }
+}
+
+const RISKY = new Set(['edge-created', 'edge-deleted', 'edge-rerouted', 'deleted'])
+
+function describeOps(ops) {
+  return ops
+    .map((o) => {
+      switch (o.op) {
+        case 'edge-created':
+          return `${o.to} depends_on +${o.from}`
+        case 'edge-deleted':
+          return `${o.to} depends_on -${o.from}`
+        case 'edge-rerouted':
+          return `${o.to} depends_on -${o.from}; ${o.new_to} depends_on +${o.new_from}`
+        case 'deleted':
+          return `delete ${o.id}`
+        default:
+          return o.op
+      }
+    })
+    .join('; ')
+}
+
+function handle(client, msg) {
+  const { type, payload, seq } = msg
+  switch (type) {
+    case 'client.hello': {
+      client.hello = payload
+      sendTo(client, 'plan.snapshot', snapshot())
+      const since = Number(payload?.lastSeq ?? 0)
+      for (const ev of events) {
+        if (ev.seq > since) client.ws.send(JSON.stringify({ type: 'event.append', payload: ev, seq: ev.seq, ts: ev.ts, replyTo: null }))
+      }
+      sendTo(client, 'bridge.status', { ok: true, failures: 0 })
+      if (!client.scriptStarted) {
+        client.scriptStarted = true
+        for (const step of scripted) {
+          setTimeout(() => {
+            if (client.ws.readyState !== 1) return
+            const m = step.message
+            if (m.type === 'event.append') appendEvent(m.payload)
+            else if (m.type === 'plan.node.upsert') {
+              const idx = state.nodes.findIndex((n) => n.id === m.payload.node.id)
+              if (idx >= 0) state.nodes[idx] = m.payload.node
+              else state.nodes.push(m.payload.node)
+              broadcast(m.type, m.payload)
+            } else if (m.type === 'agent.card.upsert') {
+              const idx = state.agents.findIndex((a) => a.id === m.payload.agent.id)
+              if (idx >= 0) state.agents[idx] = m.payload.agent
+              else state.agents.push(m.payload.agent)
+              broadcast(m.type, m.payload)
+            } else sendTo(client, m.type, m.payload)
+            log('scripted →', m.type)
+          }, step.delayMs)
+        }
+      }
+      break
+    }
+    case 'canvas.edit': {
+      const ops = payload?.ops ?? []
+      const risky = ops.filter((o) => RISKY.has(o.op))
+      const cosmetic = ops.filter((o) => !RISKY.has(o.op))
+      for (const op of cosmetic) applyOp(op)
+      if (risky.length) {
+        const request_id = `r-${Math.random().toString(36).slice(2, 8)}`
+        pendingRisky.set(request_id, { ops: risky, forSeq: seq, client })
+        const affected = [...new Set(risky.flatMap((o) => [o.from, o.to, o.new_from, o.new_to, o.id].filter(Boolean)))]
+        sendTo(client, 'risky_edit.request', {
+          request_id,
+          summary: describeOps(risky),
+          diff: risky.map((o) => JSON.stringify(o)).join('\n'),
+          affected,
+        })
+        appendEvent({ agent_id: 'user', node_id: affected[0] ?? null, type: 'risky_edit', note: describeOps(risky), data: { ops: risky, request_id } })
+      } else {
+        state.rev += 1
+        sendTo(client, 'edit.ack', { forSeq: seq, rev: state.rev }, { replyTo: seq })
+      }
+      break
+    }
+    case 'risky_edit.reply': {
+      const p = pendingRisky.get(payload.request_id)
+      if (!p) return
+      pendingRisky.delete(payload.request_id)
+      if (payload.approved) {
+        for (const op of p.ops) applyOp(op)
+        state.rev += 1
+        sendTo(client, 'edit.ack', { forSeq: p.forSeq, rev: state.rev }, { replyTo: p.forSeq })
+        appendEvent({ agent_id: 'user', node_id: null, type: 'risky_edit_accepted', note: `${describeOps(p.ops)} — "${payload.note ?? ''}"` })
+      } else {
+        sendTo(client, 'edit.reject', { forSeq: p.forSeq, reason: 'rejected by user', revert: [] }, { replyTo: p.forSeq })
+        appendEvent({ agent_id: 'user', node_id: null, type: 'risky_edit_rejected', note: describeOps(p.ops) })
+      }
+      break
+    }
+    case 'canvas.layout': {
+      const diagram = payload.diagram ?? 'hld'
+      const cur = (state.layout[diagram] ??= { version: 1, direction: 'TD', frames: {}, nodes: {}, agents: {}, edges: {} })
+      for (const k of ['frames', 'nodes', 'agents', 'edges']) {
+        cur[k] = { ...(cur[k] ?? {}), ...(payload.patch?.[k] ?? {}) }
+      }
+      cur.updatedAt = now()
+      broadcast('layout.update', { diagram, layout: cur })
+      break
+    }
+    case 'plan.relayout': {
+      const diagram = payload.diagram ?? 'hld'
+      const cur = (state.layout[diagram] ??= { version: 1, direction: 'TD', frames: {}, nodes: {}, agents: {}, edges: {} })
+      for (const [id, n] of Object.entries(cur.nodes ?? {})) if (!n.pinned) delete cur.nodes[id]
+      cur.updatedAt = now()
+      broadcast('layout.update', { diagram, layout: cur })
+      break
+    }
+    case 'chat.message': {
+      appendEvent({ agent_id: 'user', node_id: payload.nodeId ?? null, type: 'chat', note: payload.text, data: { to: payload.agentId ?? 'root' } })
+      setTimeout(() => appendEvent({ agent_id: payload.agentId ?? 'root', node_id: null, type: 'reply', note: `ack: "${payload.text.slice(0, 40)}"` }), 800)
+      break
+    }
+    case 'plan.paste': {
+      appendEvent({ agent_id: 'user', node_id: null, type: 'plan_pasted', note: `${payload.text.length} chars pasted` })
+      break
+    }
+    case 'prompt.reply': {
+      appendEvent({ agent_id: 'user', node_id: null, type: 'reply', note: String(payload.value), data: { prompt_id: payload.prompt_id } })
+      break
+    }
+    case 'dispatch.reply': {
+      if (payload.approved) {
+        const agent = { id: 'agent-canvas', assigned_node: 'node-canvas', status: 'working', claude_agent_ref: 'canvas-1', ready_deps: [], spawned_at: now(), notes: 'spawned after approval', plan_md: '', diagrams_md: '' }
+        const idx = state.agents.findIndex((a) => a.id === agent.id)
+        if (idx >= 0) state.agents[idx] = agent
+        else state.agents.push(agent)
+        broadcast('agent.card.upsert', { agent })
+        appendEvent({ agent_id: 'root', node_id: 'node-canvas', type: 'dispatch_approved', note: payload.note ?? '' })
+      } else {
+        appendEvent({ agent_id: 'root', node_id: 'node-canvas', type: 'dispatch_rejected', note: payload.note ?? '' })
+      }
+      break
+    }
+    case 'node.status': {
+      applyOp({ op: 'status-changed', id: payload.id, status: payload.status })
+      break
+    }
+    default:
+      sendTo(client, 'server.error', { forSeq: seq, code: 'unknown_type', message: `unknown message type ${type}` })
+  }
+}
+
+wss.on('connection', (ws, req) => {
+  const client = { ws, counter: 1_000_000 - 1, hello: null, scriptStarted: false }
+  clients.add(client)
+  log('client connected from', req.socket.remoteAddress, `(${clients.size} total)`)
+  ws.on('message', (data) => {
+    let msg
+    try {
+      msg = JSON.parse(String(data))
+    } catch {
+      log('bad json from client')
+      return
+    }
+    log('←', msg.type, `seq=${msg.seq}`, JSON.stringify(msg.payload).slice(0, 300))
+    try {
+      handle(client, msg)
+    } catch (err) {
+      log('handler error', err)
+      sendTo(client, 'server.error', { forSeq: msg.seq, code: 'internal', message: String(err?.message ?? err) })
+    }
+  })
+  ws.on('close', () => {
+    clients.delete(client)
+    log('client closed', `(${clients.size} total)`)
+  })
+})
+
+http.listen(PORT, '127.0.0.1', () => {
+  log(`mock whiteboard server on http://127.0.0.1:${PORT}  (ws://127.0.0.1:${PORT}/ws)`)
+  log(existsSync(DIST) ? `serving ${DIST}` : 'dist/ not built; use `pnpm dev` with WHITEBOARD_PORT=' + PORT)
+})

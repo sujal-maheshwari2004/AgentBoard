@@ -1,0 +1,171 @@
+// Types mirroring docs/CONTRACTS.md §4 (plan model) and §6 (websocket protocol).
+
+export type NodeType = 'hld' | 'lld' | 'er'
+export type NodeStatus = 'todo' | 'in_progress' | 'blocked' | 'done'
+export type AgentStatus = 'idle' | 'working' | 'blocked' | 'done'
+
+export interface PlanNode {
+  id: string
+  type: NodeType
+  title: string
+  status: NodeStatus
+  owner: string | null
+  depends_on: string[]
+  interfaces: Array<string | Record<string, unknown>>
+  body?: string
+  extra?: Record<string, unknown>
+  path?: string | null
+}
+
+export interface PlanEdge {
+  src: string
+  dst: string
+  label?: string | null
+  diagram: string
+}
+
+export interface AgentCard {
+  id: string
+  assigned_node: string | null
+  status: AgentStatus
+  claude_agent_ref?: string | null
+  ready_deps: string[]
+  spawned_at?: string | null
+  notes?: string
+  plan_md?: string
+  diagrams_md?: string
+}
+
+export interface PlanEvent {
+  seq: number
+  ts: string
+  agent_id: string
+  node_id: string | null
+  type: string
+  note: string
+  notified?: string[]
+  data?: Record<string, unknown>
+}
+
+export interface Diagram {
+  name: string
+  direction: string
+  edges: PlanEdge[]
+  mermaid: string
+  path: string
+}
+
+// §1 layout sidecar
+export interface LayoutFrame { x: number; y: number; w: number; h: number; collapsed?: boolean }
+export interface LayoutNode { x: number; y: number; w?: number; h?: number; parent?: string; pinned?: boolean }
+export interface LayoutAgent { x: number; y: number; w?: number; h?: number }
+export interface LayoutEdge { startAnchor?: [number, number]; endAnchor?: [number, number]; precise?: boolean }
+export interface Layout {
+  version?: number
+  direction?: string
+  updatedAt?: string
+  frames?: Record<string, LayoutFrame>
+  nodes?: Record<string, LayoutNode>
+  agents?: Record<string, LayoutAgent>
+  edges?: Record<string, LayoutEdge>
+}
+export type LayoutPatch = Layout
+
+export interface PlanSnapshot {
+  project: string
+  rev: number
+  nodes: PlanNode[]
+  edges: PlanEdge[]
+  agents: AgentCard[]
+  diagrams: Diagram[]
+  layout: Record<string, Layout>
+}
+
+// §4 semantic edit ops (canvas → server)
+export type EditOp =
+  | { op: 'renamed'; id: string; label: string }
+  | { op: 'node-created'; id: string; label: string; shape: string; diagram: string }
+  | { op: 'deleted'; id: string }
+  | { op: 'edge-created'; from: string; to: string; label?: string; diagram: string }
+  | { op: 'edge-deleted'; from: string; to: string; diagram: string }
+  | { op: 'edge-rerouted'; from: string; to: string; new_from: string; new_to: string; diagram: string }
+  | { op: 'status-changed'; id: string; status: NodeStatus }
+
+// §6 envelope
+export interface Envelope<T = string, P = unknown> {
+  type: T
+  payload: P
+  seq: number
+  ts: string
+  replyTo?: number | null
+}
+
+export interface NeedsInputPrompt {
+  prompt_id: string
+  agent_id: string
+  node_id: string | null
+  question: string
+  kind: 'text' | 'choice' | 'confirm'
+  choices: string[]
+}
+export interface DispatchRequest { request_id: string; node_id: string; agent_id: string; job_spec_md: string }
+export interface RiskyEditRequest { request_id: string; summary: string; diff: string; affected: string[] }
+export interface BridgeStatus { ok: boolean; failures: number; last_error?: string }
+
+export type ServerMessage =
+  | Envelope<'plan.snapshot', PlanSnapshot>
+  | Envelope<'plan.node.upsert', { node: PlanNode }>
+  | Envelope<'plan.node.delete', { id: string }>
+  | Envelope<'plan.edge.upsert', { edge: PlanEdge }>
+  | Envelope<'plan.edge.delete', { src: string; dst: string; diagram: string }>
+  | Envelope<'agent.card.upsert', { agent: AgentCard }>
+  | Envelope<'agent.card.delete', { id: string }>
+  | Envelope<'event.append', PlanEvent>
+  | Envelope<'needs_input', NeedsInputPrompt>
+  | Envelope<'dispatch.request', DispatchRequest>
+  | Envelope<'risky_edit.request', RiskyEditRequest>
+  | Envelope<'edit.ack', { forSeq: number; rev: number }>
+  | Envelope<'edit.reject', { forSeq: number; reason: string; revert: EditOp[] }>
+  | Envelope<'layout.update', { diagram: string; layout: Layout }>
+  | Envelope<'server.error', { forSeq?: number; code: string; message: string }>
+  | Envelope<'bridge.status', BridgeStatus>
+
+export type ServerMessageType = ServerMessage['type']
+
+export interface ClientPayloads {
+  'client.hello': { clientId: string; lastSeq: number; protocol: 1 }
+  'canvas.edit': { ops: EditOp[] }
+  'canvas.layout': { diagram: string; patch: LayoutPatch }
+  'chat.message': { text: string; agentId?: string; nodeId?: string }
+  'plan.paste': { text: string }
+  'prompt.reply': { prompt_id: string; value: unknown }
+  'dispatch.reply': { request_id: string; approved: boolean; note?: string }
+  'risky_edit.reply': { request_id: string; approved: boolean; note: string }
+  'plan.relayout': { diagram: string }
+  'node.status': { id: string; status: NodeStatus }
+}
+export type ClientMessageType = keyof ClientPayloads
+
+export type SocketStatus = 'connecting' | 'open' | 'closed' | 'reconnecting'
+
+export const SERVER_MESSAGE_TYPES: ServerMessageType[] = [
+  'plan.snapshot', 'plan.node.upsert', 'plan.node.delete', 'plan.edge.upsert', 'plan.edge.delete',
+  'agent.card.upsert', 'agent.card.delete', 'event.append', 'needs_input', 'dispatch.request',
+  'risky_edit.request', 'edit.ack', 'edit.reject', 'layout.update', 'server.error', 'bridge.status',
+]
+
+export function edgeKey(src: string, dst: string): string {
+  return `${src}__${dst}`
+}
+
+/** Primary diagram name: `hld` when present, else the first diagram, else `hld`. */
+export function primaryDiagram(snap: Pick<PlanSnapshot, 'diagrams'> | null | undefined): string {
+  if (!snap || snap.diagrams.length === 0) return 'hld'
+  return snap.diagrams.find((d) => d.name === 'hld')?.name ?? snap.diagrams[0].name
+}
+
+/** all depends_on done and status todo */
+export function nodeReady(node: PlanNode, byId: Map<string, PlanNode>): boolean {
+  if (node.status !== 'todo') return false
+  return node.depends_on.every((d) => byId.get(d)?.status === 'done')
+}

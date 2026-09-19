@@ -1,0 +1,82 @@
+import { useEffect, useState } from 'react'
+import { store, useStore } from '../state/store'
+import { getWiring } from '../sync/wire'
+import type { NeedsInputPrompt } from '../state/types'
+
+/** Queue of `needs_input` prompts; one shown at a time. */
+export function NeedsInputModal() {
+  const prompts = useStore((s) => s.prompts)
+  const dispatches = useStore((s) => s.dispatches)
+  const risky = useStore((s) => s.riskyEdits)
+  // dispatch and risky-edit popups take precedence so one prompt is visible at a time
+  if (dispatches.length || risky.length) return null
+  const p = prompts[0]
+  if (!p) return null
+  return <PromptDialog key={p.prompt_id} prompt={p} remaining={prompts.length - 1} />
+}
+
+function PromptDialog({ prompt, remaining }: { prompt: NeedsInputPrompt; remaining: number }) {
+  const [text, setText] = useState('')
+  useEffect(() => setText(''), [prompt.prompt_id])
+
+  const reply = (value: unknown) => {
+    const w = getWiring()
+    if (!w) return
+    w.socket.send('prompt.reply', { prompt_id: prompt.prompt_id, value })
+    store.note('reply', `reply to ${prompt.agent_id}: ${String(value)}`)
+    store.removePrompt(prompt.prompt_id)
+  }
+
+  return (
+    <div className="wb-modal-backdrop" onPointerDown={(e) => e.stopPropagation()}>
+      <div className="wb-modal" role="dialog" aria-label="Agent needs input">
+        <h2>{prompt.agent_id} needs input</h2>
+        <div className="meta">
+          {prompt.node_id ? `on ${prompt.node_id} · ` : ''}
+          {prompt.kind}
+          {remaining > 0 && <span className="wb-queue"> · {remaining} more queued</span>}
+        </div>
+        <p style={{ whiteSpace: 'pre-wrap' }}>{prompt.question}</p>
+        {prompt.kind === 'choice' && (
+          <div className="wb-choices">
+            {prompt.choices.map((c) => (
+              <button key={c} className="wb-btn" onClick={() => reply(c)}>
+                {c}
+              </button>
+            ))}
+          </div>
+        )}
+        {prompt.kind === 'confirm' && (
+          <div className="actions">
+            <button className="wb-btn" onClick={() => reply(false)}>
+              No
+            </button>
+            <button className="wb-btn primary" onClick={() => reply(true)}>
+              Yes
+            </button>
+          </div>
+        )}
+        {prompt.kind === 'text' && (
+          <>
+            <textarea
+              className="wb-textarea"
+              rows={4}
+              autoFocus
+              value={text}
+              onChange={(e) => setText(e.target.value)}
+              onKeyDown={(e) => {
+                if (e.key === 'Enter' && (e.metaKey || e.ctrlKey) && text.trim()) reply(text.trim())
+                e.stopPropagation()
+              }}
+            />
+            <div className="actions">
+              <button className="wb-btn primary" disabled={!text.trim()} onClick={() => reply(text.trim())}>
+                Reply
+              </button>
+            </div>
+          </>
+        )}
+      </div>
+    </div>
+  )
+}

@@ -1,0 +1,46 @@
+{
+  "project": "/Users/example/AgentBoard",
+  "rev": 7,
+  "nodes": [
+    { "id": "node-files", "type": "hld", "title": "Files layer", "status": "done", "owner": "agent-files", "depends_on": [], "interfaces": ["atomic_write(path, data)", "split_frontmatter(text)"], "body": "" },
+    { "id": "node-parser", "type": "lld", "title": "Mermaid parser", "status": "in_progress", "owner": "agent-parser", "depends_on": ["node-files"], "interfaces": ["parse(text) -> MermaidDoc", "serialize(doc) -> str"], "body": "" },
+    { "id": "node-plan", "type": "hld", "title": "Plan core", "status": "todo", "owner": null, "depends_on": ["node-files"], "interfaces": [], "body": "" },
+    { "id": "node-canvas", "type": "hld", "title": "tldraw canvas", "status": "todo", "owner": null, "depends_on": ["node-plan"], "interfaces": [], "body": "" },
+    { "id": "node-server", "type": "hld", "title": "FastAPI server", "status": "blocked", "owner": null, "depends_on": ["node-plan", "node-parser"], "interfaces": [], "body": "" },
+    { "id": "node-cli", "type": "hld", "title": "CLI + skill", "status": "todo", "owner": null, "depends_on": ["node-server"], "interfaces": [], "body": "" }
+  ],
+  "edges": [
+    { "src": "node-files", "dst": "node-parser", "label": null, "diagram": "hld" },
+    { "src": "node-files", "dst": "node-plan", "label": "frontmatter", "diagram": "hld" },
+    { "src": "node-plan", "dst": "node-canvas", "label": null, "diagram": "hld" },
+    { "src": "node-plan", "dst": "node-server", "label": null, "diagram": "hld" },
+    { "src": "node-parser", "dst": "node-server", "label": null, "diagram": "hld" },
+    { "src": "node-server", "dst": "node-cli", "label": null, "diagram": "hld" }
+  ],
+  "agents": [
+    { "id": "agent-files", "assigned_node": "node-files", "status": "done", "claude_agent_ref": "files-1", "ready_deps": [], "spawned_at": "2026-09-20T00:01:00.000Z", "notes": "atomic writes + frontmatter landed", "plan_md": "", "diagrams_md": "" },
+    { "id": "agent-parser", "assigned_node": "node-parser", "status": "idle", "claude_agent_ref": null, "ready_deps": ["node-files"], "spawned_at": null, "notes": "", "plan_md": "# Job: node-parser\n\nImplement parse/serialize.", "diagrams_md": "" }
+  ],
+  "diagrams": [
+    {
+      "name": "hld",
+      "direction": "TD",
+      "edges": [],
+      "mermaid": "flowchart TD\n    node-files[Files layer]\n    node-parser[Mermaid parser]\n    node-plan[Plan core]\n    node-canvas[tldraw canvas]\n    node-server[FastAPI server]\n    node-cli[CLI + skill]\n    node-files --> node-parser\n    node-files -->|frontmatter| node-plan\n    node-plan --> node-canvas\n    node-plan --> node-server\n    node-parser --> node-server\n    node-server --> node-cli\n",
+      "path": ".whiteboard/plan/hld.md"
+    }
+  ],
+  "layout": {
+    "hld": {
+      "version": 1,
+      "direction": "TD",
+      "updatedAt": "2026-09-20T00:00:00.000Z",
+      "frames": { "plan-board": { "x": 0, "y": 0, "w": 1000, "h": 700, "collapsed": false } },
+      "nodes": {
+        "node-files": { "x": 400, "y": 40, "w": 200, "h": 80, "parent": "plan-board", "pinned": true }
+      },
+      "agents": {},
+      "edges": {}
+    }
+  }
+}
