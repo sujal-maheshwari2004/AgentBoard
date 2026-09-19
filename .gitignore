@@ -13,3 +13,4 @@ canvas/.vite/
 .whiteboard/server.log*
 .whiteboard/.cache/
 *.layout.json
+.claude/

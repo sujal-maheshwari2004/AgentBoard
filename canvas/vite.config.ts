@@ -8,7 +8,7 @@ const port = process.env.WHITEBOARD_PORT ?? '43000'
 export default defineConfig({
   plugins: [react()],
   base: '/',
-  build: { outDir: 'dist', sourcemap: true, emptyOutDir: true },
+  build: { outDir: 'dist', sourcemap: false, emptyOutDir: true },
   server: {
     port: 5173,
     proxy: {
