@@ -5,6 +5,7 @@
 import { EASINGS, useValue, type Editor } from 'tldraw'
 import { store, useStore } from '../state/store'
 import { boardBounds, boardSpecsFor, presentBoards, type BoardName } from '../sync/boards'
+import { cameraAnimation } from '../sync/motion'
 
 export const BOARD_ZOOM_INSET = 64
 export const BOARD_ZOOM_MS = 300
@@ -12,7 +13,7 @@ export const BOARD_ZOOM_MS = 300
 export function focusBoard(editor: Editor, board: BoardName): void {
   const bounds = boardBounds(editor, board)
   if (!bounds) return
-  editor.zoomToBounds(bounds, { inset: BOARD_ZOOM_INSET, animation: { duration: BOARD_ZOOM_MS, easing: EASINGS.easeInOutCubic } })
+  editor.zoomToBounds(bounds, { inset: BOARD_ZOOM_INSET, animation: { ...cameraAnimation(BOARD_ZOOM_MS), easing: EASINGS.easeInOutCubic } })
   store.setActiveBoard(board)
 }
 

@@ -1,0 +1,57 @@
+/*
+ * One home for every animation primitive the canvas uses (B.S6 item 7).
+ *
+ * `@property --wb-angle` and `@keyframes wb-rotate` used to live in `shapes/PlanNodeUtil.css`,
+ * which meant the inspector's status ring silently lost its animation whenever no plan node was
+ * on screen to pull that sheet in. Both now live here, imported from `main.tsx` before anything
+ * that consumes them, so no component can lose its motion by accident.
+ *
+ * The reduced-motion block at the bottom is the safety net (B.S6 item 13): every consumer also
+ * carries its own `@media (prefers-reduced-motion: reduce)` rule, and this one catches anything
+ * new that forgets to. Camera flights are handled in JS — see `sync/motion.ts`.
+ */
+
+@property --wb-angle {
+  syntax: '<angle>';
+  initial-value: 0deg;
+  inherits: false;
+}
+
+/* the conic status ring: 1.5s = running, 4.5s = waiting (n8n; B.1 item 3) */
+@keyframes wb-rotate {
+  to {
+    --wb-angle: 360deg;
+  }
+}
+
+/* marching dashes on an in-flight edge (React Flow's `dashdraw`; B.1 item 5) */
+@keyframes wb-dashdraw {
+  from {
+    stroke-dashoffset: 10;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  /*
+   * Nodes, agent cards, agent folders, the inspector ring, the progress rails and the edges:
+   * every rotating ring, marching dash and width transition stops. Anything we add later that
+   * animates inside a `.wb-*` element is caught here too.
+   */
+  .wb-node::after,
+  .wb-agent::after,
+  .wb-folder::after,
+  .wb-insp-ring::after,
+  [class^='wb-']::before,
+  [class^='wb-']::after,
+  [class*=' wb-']::before,
+  [class*=' wb-']::after,
+  [class^='wb-'],
+  [class*=' wb-'] {
+    animation: none !important;
+    transition: none !important;
+  }
+  .tl-shape[data-wb-edge] .tl-svg-container g,
+  .tl-shape[data-wb-edge] .tl-svg-container path {
+    animation: none !important;
+  }
+}

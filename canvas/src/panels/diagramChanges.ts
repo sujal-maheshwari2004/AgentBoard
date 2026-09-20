@@ -82,3 +82,54 @@ export function diagramReplyPayload(
   if (mermaidEdited(req.mermaid, opts.text ?? '')) payload.mermaid = (opts.text ?? '').trim()
   return payload
 }
+
+// ---- grouping a large diff (B.S6 item 10) ----
+
+/**
+ * Past this many rows the Changes block stops being a flat list inside a 22vh scroller (14 rows
+ * was observed in B.S5) and becomes four collapsible groups.
+ */
+export const CHANGES_GROUP_THRESHOLD = 8
+/** a group with more rows than this starts collapsed */
+export const CHANGES_GROUP_OPEN_MAX = 6
+
+export interface ChangeGroup {
+  key: string
+  /** `'3 nodes added'`, `'1 edge removed'`, … */
+  title: string
+  tone: 'added' | 'removed'
+  what: 'node' | 'edge'
+  lines: ChangeLine[]
+  /** whether this group is expanded when the modal opens */
+  defaultOpen: boolean
+}
+
+const GROUP_ORDER: Array<{ tone: 'added' | 'removed'; what: 'node' | 'edge' }> = [
+  { tone: 'added', what: 'node' },
+  { tone: 'removed', what: 'node' },
+  { tone: 'added', what: 'edge' },
+  { tone: 'removed', what: 'edge' },
+]
+
+/** the four B.10 buckets, in draw order, empty ones dropped */
+export function groupChangeLines(lines: readonly ChangeLine[]): ChangeGroup[] {
+  const groups: ChangeGroup[] = []
+  for (const o of GROUP_ORDER) {
+    const rows = lines.filter((l) => l.tone === o.tone && l.what === o.what)
+    if (!rows.length) continue
+    groups.push({
+      key: `${o.tone}-${o.what}`,
+      title: `${rows.length} ${o.what}${rows.length === 1 ? '' : 's'} ${o.tone}`,
+      tone: o.tone,
+      what: o.what,
+      lines: rows,
+      defaultOpen: rows.length <= CHANGES_GROUP_OPEN_MAX,
+    })
+  }
+  return groups
+}
+
+/** a flat list is fine up to the threshold; a big diff is grouped */
+export function shouldGroupChanges(lines: readonly ChangeLine[]): boolean {
+  return lines.length > CHANGES_GROUP_THRESHOLD
+}

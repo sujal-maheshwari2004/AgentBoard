@@ -11,6 +11,7 @@ import {
   deleteEdge,
   deleteNode,
   ensureBoardFrames,
+  fitCameraToBoard,
   folderLayout,
   kindOf,
   nodeContext,
@@ -56,7 +57,7 @@ export function getWiring(): Wiring | null {
   return current
 }
 
-function applyMessage(editor: Editor, s: Store, msg: ServerMessage): void {
+function applyMessage(editor: Editor, s: Store, msg: ServerMessage, onFirstSnapshot?: () => void): void {
   const state = s.getState()
   const nodes = Object.values(state.nodes)
   const edges = Object.values(state.edges)
@@ -64,6 +65,7 @@ function applyMessage(editor: Editor, s: Store, msg: ServerMessage): void {
   switch (msg.type) {
     case 'plan.snapshot':
       applySnapshot(editor, msg.payload)
+      onFirstSnapshot?.()
       break
     case 'plan.node.upsert':
       upsertNodeFromState(editor, msg.payload.node, nodes, edges, layout)
@@ -126,13 +128,24 @@ export function mountWiring(editor: Editor, s: Store = store, url: string = sock
   current?.dispose()
   ensureBoardFrames(editor)
 
+  /**
+   * B.S6 item 2: the very first snapshot puts the camera on the active board's *content*.
+   * tldraw's default camera shows the empty top-left of a big frame, which is what made the
+   * boards read as empty. Only once — after that the camera is the owner's.
+   */
+  let cameraPlaced = false
+  const placeCamera = () => {
+    if (cameraPlaced) return
+    cameraPlaced = fitCameraToBoard(editor, s.getState().activeBoard)
+  }
+
   const socket = createSocket({
     url,
     onStatus: (st) => s.setSocketStatus(st),
     onMessage: (msg) => {
       s.dispatch(msg)
       try {
-        applyMessage(editor, s, msg)
+        applyMessage(editor, s, msg, placeCamera)
       } catch (err) {
         console.error('[whiteboard] apply failed for', msg.type, err)
         s.note('error', `apply ${msg.type} failed: ${(err as Error).message}`)

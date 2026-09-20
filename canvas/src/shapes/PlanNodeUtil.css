@@ -6,17 +6,8 @@
  * 4.5s — one mechanism, two meanings.
  */
 
-@property --wb-angle {
-  syntax: '<angle>';
-  initial-value: 0deg;
-  inherits: false;
-}
-
-@keyframes wb-rotate {
-  to {
-    --wb-angle: 360deg;
-  }
-}
+/* `@property --wb-angle` and `@keyframes wb-rotate` live in styles/motion.css, imported once
+   from main.tsx — no component may depend on another component's sheet for its animation. */
 
 /* ---------- box ---------- */
 
@@ -34,8 +25,6 @@
   border: 1.5px solid var(--wb-border-2);
   font-family: var(--wb-font);
   color: var(--wb-text);
-  /* zoom-adaptive border alpha (0.1 -> 0.7 as zoom 1.0 -> 0.2, gamma 2.2) */
-  --wb-border-alpha: 0.1;
 }
 
 /* board hue: hex fallback declared before every oklch() use */
@@ -132,7 +121,7 @@
   letter-spacing: 0.02em;
   text-transform: uppercase;
   background: var(--wb-ready);
-  color: #fff;
+  color: var(--wb-on-accent);
 }
 
 .wb-node-check {
@@ -149,13 +138,13 @@
 
 .wb-node.undispatched {
   border: 1.5px dashed var(--wb-idle);
-  border-color: color-mix(in srgb, var(--wb-text) calc(var(--wb-border-alpha) * 100%), var(--wb-idle));
+  border-color: color-mix(in srgb, var(--wb-text) calc(var(--wb-border-alpha, 0.1) * 100%), var(--wb-idle));
   background: transparent;
 }
 
 .wb-node.idle {
   border: 1.5px solid var(--wb-idle);
-  border-color: color-mix(in srgb, var(--wb-text) calc(var(--wb-border-alpha) * 100%), var(--wb-idle));
+  border-color: color-mix(in srgb, var(--wb-text) calc(var(--wb-border-alpha, 0.1) * 100%), var(--wb-idle));
 }
 
 .wb-node.ready {

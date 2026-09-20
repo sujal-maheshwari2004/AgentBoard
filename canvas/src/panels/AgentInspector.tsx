@@ -13,7 +13,7 @@
 // The editors reuse the B.S3 payload helpers through `Wiring.editAgentPlan/editAgentDiagram`,
 // and an inline error is matched on `edit.reject.forSeq === sentSeq` so one agent's parse error
 // can never surface under another's box.
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from 'react'
 import { store, useStore } from '../state/store'
 import type { AgentCard, PlanEvent } from '../state/types'
 import { agentElapsed, agentStalled, formatElapsed, formatMetricsLine } from '../state/format'
@@ -21,6 +21,7 @@ import { agentCardState, statusColor } from '../shapes/agentCard'
 import { EDIT_DEBOUNCE_MS, folderMermaid } from '../shapes/agentFolder'
 import { revealAgentFolder } from '../sync/apply'
 import { getWiring } from '../sync/wire'
+import { defaultOpenSections, toggleSection, type InspectorSection } from './islands'
 
 /** how much of the agent's feed the island shows before it scrolls */
 const FEED_LIMIT = 12
@@ -36,10 +37,12 @@ export function agentEvents(events: PlanEvent[], agent: Pick<AgentCard, 'id' | '
 export function AgentInspector() {
   const agentId = useStore((s) => s.inspectorAgentId)
   const agent = useStore((s) => (s.inspectorAgentId ? s.agents[s.inspectorAgentId] : undefined))
-  const chatOpen = useStore((s) => s.chatOpen)
   const nowMs = useStore((s) => s.nowMs)
   const events = useStore((s) => s.events)
   const unread = useStore((s) => (s.inspectorAgentId ? (s.threadUnread[s.inspectorAgentId] ?? 0) : 0))
+  // B.S6 item 3: collapsible sections — one scrolling column squeezed the feed to a single row
+  const [open, setOpen] = useState(defaultOpenSections)
+  const toggle = useCallback((section: InspectorSection) => setOpen((o) => toggleSection(o, section)), [])
 
   const feed = useMemo(() => (agent ? agentEvents(events, agent).slice(-FEED_LIMIT).reverse() : []), [events, agent])
 
@@ -50,11 +53,10 @@ export function AgentInspector() {
   const stalled = agentStalled(agent, nowMs)
   const progress = typeof agent.progress === 'number' ? Math.min(1, Math.max(0, agent.progress)) : -1
   const activity = agent.activity || agent.notes || (agent.assigned_node ? `on ${agent.assigned_node}` : 'unassigned')
-  // the chat island is 420px tall expanded and a 44px pill collapsed; the inspector stacks on it
-  const bottom = chatOpen ? 436 : 60
+  // `bottom` is CSS: `calc(var(--wb-chat-h) + var(--wb-s6))`, and ChatPanel owns `--wb-chat-h`
 
   return (
-    <div className="wb-panel wb-inspector" style={{ bottom }} data-testid="agent-inspector">
+    <div className="wb-panel wb-inspector" data-testid="agent-inspector">
       <div className="wb-insp-head">
         <span
           className={`wb-insp-ring ${state.cls}`}
@@ -77,7 +79,7 @@ export function AgentInspector() {
         </button>
       </div>
 
-      <div className={`wb-insp-activity${stalled ? ' stalled' : ''}`} title={activity}>
+      <div className={`wb-insp-activity${stalled ? ' stalled' : ''}`} title={stalled ? `${activity} — no heartbeat for over 90s` : activity}>
         ▸ {activity}
         {stalled ? ' · stalled?' : ''}
       </div>
@@ -86,9 +88,12 @@ export function AgentInspector() {
         <div
           className={`wb-insp-rail ${state.cls}`}
           role="progressbar"
+          aria-label={`${agent.id} progress`}
           aria-valuemin={0}
           aria-valuemax={100}
           aria-valuenow={progress >= 0 ? Math.round(progress * 100) : undefined}
+          aria-valuetext={progress >= 0 ? `${Math.round(progress * 100)}%` : 'no progress reported'}
+          title={progress >= 0 ? `${Math.round(progress * 100)}% reported` : 'no progress reported'}
         >
           <span className="wb-insp-rail-fill" style={{ width: `${Math.max(0, progress) * 100}%` }} />
         </div>
@@ -98,12 +103,20 @@ export function AgentInspector() {
       <div className="wb-insp-metrics">{formatMetricsLine(agent.metrics)}</div>
 
       <div className="wb-insp-actions">
-        <button type="button" className="wb-btn" onClick={() => store.openThread(agent.id)}>
+        <button
+          type="button"
+          className="wb-btn"
+          title={`Open the ${agent.id} chat thread${unread > 0 ? ` (${unread} unread)` : ''}`}
+          aria-label={`Open the ${agent.id} chat thread${unread > 0 ? `, ${unread} unread` : ''}`}
+          onClick={() => store.openThread(agent.id)}
+        >
           Chat thread{unread > 0 ? ` (${unread})` : ''}
         </button>
         <button
           type="button"
           className="wb-btn"
+          title={`Open the ${agent.id} folder on the canvas`}
+          aria-label={`Open the ${agent.id} folder on the canvas`}
           onClick={() => {
             const editor = getWiring()?.editor
             if (editor) revealAgentFolder(editor, agent.id)
@@ -113,8 +126,13 @@ export function AgentInspector() {
         </button>
       </div>
 
-      <section className="wb-insp-section">
-        <header className="wb-insp-label">activity feed</header>
+      <Collapsible
+        id="feed"
+        label="activity feed"
+        count={`${feed.length} event${feed.length === 1 ? '' : 's'}`}
+        open={open.feed}
+        onToggle={toggle}
+      >
         <ul className="wb-insp-feed">
           {feed.length === 0 && <li className="wb-insp-empty">no events for this agent yet</li>}
           {feed.map((ev) => (
@@ -125,11 +143,51 @@ export function AgentInspector() {
             </li>
           ))}
         </ul>
-      </section>
+      </Collapsible>
 
-      <PlanEditor agentId={agent.id} planMd={agent.plan_md ?? ''} />
-      <DiagramEditor agentId={agent.id} mermaid={folderMermaid(agent)} serverError={agent.diagram?.error ?? ''} />
+      <Collapsible id="plan" label="plan.md" open={open.plan} onToggle={toggle}>
+        <PlanEditor agentId={agent.id} planMd={agent.plan_md ?? ''} />
+      </Collapsible>
+
+      <Collapsible id="diagram" label="diagrams.md" open={open.diagram} onToggle={toggle}>
+        <DiagramEditor agentId={agent.id} mermaid={folderMermaid(agent)} serverError={agent.diagram?.error ?? ''} />
+      </Collapsible>
     </div>
+  )
+}
+
+/** one disclosure section of the inspector column (B.S6 item 3) */
+function Collapsible({
+  id,
+  label,
+  count,
+  open,
+  onToggle,
+  children,
+}: {
+  id: InspectorSection
+  label: string
+  count?: string
+  open: boolean
+  onToggle: (section: InspectorSection) => void
+  children: ReactNode
+}) {
+  return (
+    <section className="wb-insp-section" data-section={id}>
+      <button
+        type="button"
+        className="wb-insp-toggle"
+        aria-expanded={open}
+        title={`${open ? 'Collapse' : 'Expand'} ${label}`}
+        aria-label={`${open ? 'Collapse' : 'Expand'} ${label}${count ? `, ${count}` : ''}`}
+        onClick={() => onToggle(id)}
+      >
+        <span aria-hidden="true">{open ? '▾' : '▸'}</span>
+        <span>{label}</span>
+        {count && <span className="count">{count}</span>}
+      </button>
+      {open && children}
+    </section>
   )
 }
 
@@ -169,8 +227,7 @@ function PlanEditor({ agentId, planMd }: { agentId: string; planMd: string }) {
     [agentId, setText],
   )
   return (
-    <section className="wb-insp-section">
-      <header className="wb-insp-label">plan.md</header>
+    <>
       <textarea
         className="wb-insp-text"
         spellCheck={false}
@@ -179,7 +236,7 @@ function PlanEditor({ agentId, planMd }: { agentId: string; planMd: string }) {
         onChange={(e) => onChange(e.target.value)}
         onKeyDown={(e) => e.stopPropagation()}
       />
-    </section>
+    </>
   )
 }
 
@@ -207,8 +264,7 @@ function DiagramEditor({ agentId, mermaid, serverError }: { agentId: string; mer
   const error = rejected || serverError
 
   return (
-    <section className="wb-insp-section">
-      <header className="wb-insp-label">diagrams.md</header>
+    <>
       <textarea
         className="wb-insp-text wb-insp-mono"
         spellCheck={false}
@@ -222,6 +278,6 @@ function DiagramEditor({ agentId, mermaid, serverError }: { agentId: string; mer
           {error}
         </div>
       )}
-    </section>
+    </>
   )
 }

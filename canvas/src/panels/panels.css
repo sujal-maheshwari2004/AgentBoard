@@ -60,9 +60,9 @@
 .wb-btn.primary {
   background: var(--wb-selection);
   border-color: var(--wb-selection);
-  color: #fff;
+  color: var(--wb-on-accent);
 }
-.wb-btn.primary:hover { background: color-mix(in srgb, #000 12%, var(--wb-selection)); }
+.wb-btn.primary:hover { background: color-mix(in srgb, var(--wb-text) 12%, var(--wb-selection)); }
 .wb-btn.danger { background: var(--wb-island); border-color: var(--wb-blocked); color: var(--wb-blocked); }
 .wb-btn.danger:hover { background: color-mix(in srgb, var(--wb-blocked) 10%, var(--wb-island)); }
 .wb-btn.active {
@@ -143,15 +143,59 @@
   display: flex;
   flex-direction: column;
 }
+/*
+ * Collapsed (the default, B.S6 item 1): a compact pill that cannot cover the first board. The
+ * 320px cap also keeps it clear of the centred toolbar at 1440 wide.
+ */
+.wb-ticker.collapsed {
+  width: auto;
+  max-width: min(320px, calc(100vw - var(--wb-s9)));
+  border-radius: var(--wb-r-pill);
+}
 .wb-ticker-head {
   display: flex;
   align-items: center;
-  justify-content: space-between;
+  gap: var(--wb-s3);
+  width: 100%;
+  box-sizing: border-box;
   padding: var(--wb-s3) var(--wb-s4);
+  border: 0;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  text-align: left;
   cursor: pointer;
   user-select: none;
   font-weight: 600;
+  border-radius: inherit;
 }
+.wb-ticker-head:focus-visible { outline: 2px solid var(--wb-selection); outline-offset: -2px; }
+.wb-ticker-title { flex: 0 0 auto; }
+.wb-ticker-count {
+  min-width: 18px;
+  height: 18px;
+  padding: 0 var(--wb-s2);
+  box-sizing: border-box;
+  border-radius: var(--wb-r-pill);
+  background: var(--wb-island-2);
+  border: 1px solid var(--wb-border-2);
+  color: var(--wb-text-2);
+  font: 600 var(--wb-t1) / 16px var(--wb-font);
+  text-align: center;
+}
+.wb-ticker.collapsed .wb-ticker-head { padding-right: var(--wb-s5); }
+.wb-ticker-last {
+  flex: 1 1 auto;
+  min-width: 0;
+  font-weight: 400;
+  font-size: var(--wb-t2);
+  color: var(--wb-text-3);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.wb-ticker-last.err { color: var(--wb-blocked); }
+.wb-ticker:not(.collapsed) .wb-ticker-caret { margin-left: 0; }
 .wb-ticker-list {
   list-style: none;
   margin: 0;
@@ -177,11 +221,12 @@
 
 /* ---------- chat threads (bottom right, 360x420; B.8/B.9) ---------- */
 
+/* height comes from `--wb-chat-h`, which ChatPanel writes on <html> (B.S6 item 4) */
 .wb-chat {
   right: var(--wb-s4);
   bottom: var(--wb-s4);
   width: 360px;
-  height: 420px;
+  height: var(--wb-chat-h, 420px);
   display: flex;
   flex-direction: column;
   overflow: hidden;
@@ -203,6 +248,8 @@
   font-size: var(--wb-t6);
   pointer-events: auto;
 }
+/* B.S6 item 8: the collapsed pill is a real focus stop and must show it */
+.wb-chat-pill:focus-visible { outline: 2px solid var(--wb-selection); outline-offset: 2px; }
 .wb-chat-count {
   position: absolute;
   top: -2px;
@@ -213,20 +260,50 @@
   box-sizing: border-box;
   border-radius: var(--wb-r-pill);
   background: var(--wb-blocked);
-  color: #fff;
+  color: var(--wb-on-accent);
   font: 600 var(--wb-t1) / 18px var(--wb-font);
   text-align: center;
 }
 
+/*
+ * Tab strip (B.S6 item 5). The strip used to be `overflow-x: auto; scrollbar-width: none`, so
+ * past ~5 threads there was nothing on screen saying more existed. Now: a thin scrollbar, a
+ * fade at whichever edge has more tabs behind it, and ‹ / › buttons that scroll it.
+ */
+.wb-chat-tabbar {
+  display: flex;
+  align-items: stretch;
+  gap: var(--wb-s1);
+  padding: var(--wb-s3) var(--wb-s3) 0;
+  border-bottom: 1px solid var(--wb-border);
+  min-width: 0;
+}
 .wb-chat-tabs {
   display: flex;
   align-items: center;
   gap: var(--wb-s1);
-  padding: var(--wb-s3) var(--wb-s3) 0;
-  border-bottom: 1px solid var(--wb-border);
+  flex: 1 1 auto;
+  min-width: 0;
   overflow-x: auto;
-  scrollbar-width: none;
+  scrollbar-width: thin;
+  scroll-behavior: smooth;
+  /* the fade tells you there is more in that direction even when the scrollbar is hidden */
+  mask-image: linear-gradient(to right, transparent 0, #000 12px, #000 calc(100% - 12px), transparent 100%);
 }
+.wb-chat-tabs::-webkit-scrollbar { height: 4px; }
+.wb-chat-tabs::-webkit-scrollbar-thumb { background: var(--wb-border-2); border-radius: var(--wb-r-pill); }
+.wb-chat-more {
+  flex: 0 0 auto;
+  border: 0;
+  background: transparent;
+  color: var(--wb-text-2);
+  cursor: pointer;
+  font-size: var(--wb-t5);
+  line-height: 1;
+  padding: 0 var(--wb-s2);
+}
+.wb-chat-more:hover { color: var(--wb-text); }
+.wb-chat-more:focus-visible { outline: 2px solid var(--wb-selection); outline-offset: -2px; }
 .wb-chat-tab {
   font: 600 var(--wb-t2) / 1 var(--wb-font);
   letter-spacing: 0.02em;
@@ -251,7 +328,7 @@
   box-sizing: border-box;
   border-radius: var(--wb-r-pill);
   background: var(--wb-blocked);
-  color: #fff;
+  color: var(--wb-on-accent);
   font: 600 var(--wb-t1) / 14px var(--wb-font);
   text-align: center;
 }
@@ -309,6 +386,30 @@
 }
 .wb-chat-ts { font-size: var(--wb-t2); color: var(--wb-text-3); margin-top: 1px; }
 
+/* B.S6 item 6: a visible Reply affordance on hover/focus, not just a hidden double-click */
+.wb-chat-bubble-row { display: flex; align-items: flex-start; gap: var(--wb-s2); }
+.wb-chat-group.mine .wb-chat-bubble-row { flex-direction: row-reverse; }
+.wb-chat-reply {
+  flex: 0 0 auto;
+  opacity: 0;
+  border: 1px solid var(--wb-border);
+  border-radius: var(--wb-r-pill);
+  background: var(--wb-island);
+  color: var(--wb-text-2);
+  font-size: var(--wb-t2);
+  line-height: 1;
+  padding: var(--wb-s2);
+  cursor: pointer;
+}
+.wb-chat-bubble-row:hover .wb-chat-reply,
+.wb-chat-bubble-row:focus-within .wb-chat-reply { opacity: 1; }
+.wb-chat-reply:hover { color: var(--wb-text); border-color: var(--wb-border-2); }
+.wb-chat-reply:focus-visible { opacity: 1; outline: 2px solid var(--wb-selection); outline-offset: 1px; }
+/* coarse pointers never hover: show it always (B.1 item 12 — no affordance behind a gesture) */
+@media (hover: none) {
+  .wb-chat-reply { opacity: 1; }
+}
+
 .wb-chat-replying {
   display: flex;
   align-items: center;
@@ -331,10 +432,18 @@
 
 /* ---------- agent inspector (right column, above the chat island; B.8) ---------- */
 
+/*
+ * The inspector stacks on the chat island: one number, `--wb-chat-h`, drives both (B.S6 item 4)
+ * instead of the hand-derived 436/60 pair the B.S4 hand-off flagged. It is also taller and
+ * resizable now, and its sections collapse (item 3), so the activity feed is never one row.
+ */
 .wb-inspector {
   right: var(--wb-s4);
+  bottom: calc(var(--wb-chat-h, 420px) + var(--wb-s6));
   width: 360px;
-  max-height: 52vh;
+  max-height: calc(100vh - var(--wb-chat-h, 420px) - 120px);
+  min-height: 160px;
+  resize: vertical;
   overflow-y: auto;
   padding: var(--wb-s4);
   display: flex;
@@ -377,7 +486,7 @@
   -webkit-mask: radial-gradient(circle, transparent 0 6px, #000 6px);
   mask: radial-gradient(circle, transparent 0 6px, #000 6px);
 }
-/* `@property --wb-angle` and `@keyframes wb-rotate` are declared once in PlanNodeUtil.css */
+/* `@property --wb-angle` and `@keyframes wb-rotate` are declared once in styles/motion.css */
 .wb-insp-ring.running::after { animation: wb-rotate 1.5s linear infinite; }
 .wb-insp-ring.waiting::after { animation: wb-rotate 4.5s linear infinite; }
 @media (prefers-reduced-motion: reduce) {
@@ -413,11 +522,36 @@
   text-transform: uppercase;
   color: var(--wb-text-3);
 }
+/* a section header is a disclosure button (B.S6 item 3) */
+.wb-insp-toggle {
+  display: flex;
+  align-items: center;
+  gap: var(--wb-s2);
+  width: 100%;
+  padding: var(--wb-s2) 0;
+  border: 0;
+  border-top: 1px solid var(--wb-border);
+  background: transparent;
+  color: var(--wb-text-3);
+  font: 600 var(--wb-t1) / 1 var(--wb-font);
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  cursor: pointer;
+  text-align: left;
+}
+.wb-insp-toggle:hover { color: var(--wb-text-2); }
+.wb-insp-toggle:focus-visible { outline: 2px solid var(--wb-selection); outline-offset: -2px; }
+.wb-insp-toggle .count {
+  margin-left: auto;
+  font-weight: 400;
+  letter-spacing: 0;
+  text-transform: none;
+}
 .wb-insp-feed {
   list-style: none;
   margin: 0;
   padding: 0;
-  max-height: 120px;
+  max-height: 220px;
   overflow-y: auto;
   font-size: var(--wb-t2);
 }
@@ -449,7 +583,7 @@
   position: absolute;
   inset: 0;
   z-index: 2000;
-  background: rgba(0, 0, 0, 0.35);
+  background: var(--wb-scrim);
   display: flex;
   align-items: center;
   justify-content: center;
@@ -467,7 +601,17 @@
   padding: var(--wb-s5) var(--wb-s6);
   font-size: var(--wb-t4);
 }
-.wb-modal h2 { margin: 0 0 var(--wb-s4); font-size: var(--wb-t6); }
+.wb-modal h2 {
+  margin: 0 0 var(--wb-s4);
+  font-size: var(--wb-t6);
+  display: flex;
+  align-items: center;
+  gap: var(--wb-s4);
+}
+/* B.S6 item 11: "Show me" flies the camera to the proposed board behind the dialog */
+.wb-showme { margin-left: auto; flex: 0 0 auto; }
+.wb-esc-hint { margin-right: auto; }
+.wb-modal:focus-visible { outline: 2px solid var(--wb-selection); outline-offset: 2px; }
 .wb-modal .meta { color: var(--wb-text-2); font-size: var(--wb-t3); margin-bottom: var(--wb-s4); }
 .wb-modal .actions {
   display: flex;
@@ -532,16 +676,10 @@
 .wb-board-seg:not(.active) { color: var(--seg); }
 .wb-board-seg:not(.active):hover { background: color-mix(in srgb, var(--seg) 12%, var(--wb-island)); }
 
+/* the dark board hues are lighter (Langfuse's inversion), so `--wb-on-hue` flips for the fill */
 .wb-board-seg.active {
   background: var(--seg);
-  color: #fff;
-}
-
-/* the dark-mode board hues are lighter (Langfuse's inversion), so the fill takes dark text */
-:root[data-theme='dark'] .wb-board-seg.active { color: #171717; }
-
-@media (prefers-color-scheme: dark) {
-  :root:not([data-theme='light']) .wb-board-seg.active { color: #171717; }
+  color: var(--wb-on-hue);
 }
 
 /* ---------- diagram-proposal modal (B.10) ---------- */
@@ -564,7 +702,7 @@
   border-radius: var(--wb-r2);
   background: var(--wb-island-2);
   padding: var(--wb-s3);
-  max-height: 22vh;
+  max-height: 34vh;
   overflow: auto;
   display: flex;
   flex-direction: column;
@@ -592,6 +730,29 @@
 .wb-change.removed .sign, .wb-change.removed code { color: var(--wb-blocked); }
 .wb-change.removed code { text-decoration: line-through; }
 .wb-change.none { color: var(--wb-text-3); font-style: italic; }
+
+/* a large diff (14+ rows was observed) becomes four collapsible groups — B.S6 item 10 */
+.wb-changes.grouped { gap: var(--wb-s2); }
+.wb-change-group { display: flex; flex-direction: column; gap: var(--wb-s1); }
+.wb-change-group .wb-change { padding-left: var(--wb-s6); }
+.wb-change-head {
+  display: flex;
+  align-items: center;
+  gap: var(--wb-s3);
+  width: 100%;
+  padding: var(--wb-s1) 0;
+  border: 0;
+  background: transparent;
+  color: var(--wb-text-2);
+  font: 600 var(--wb-t3) / 1.4 var(--wb-font);
+  cursor: pointer;
+  text-align: left;
+}
+.wb-change-head .sign { font-family: var(--wb-mono); font-weight: 700; }
+.wb-change-group.added .wb-change-head .sign { color: var(--wb-done); }
+.wb-change-group.removed .wb-change-head .sign { color: var(--wb-blocked); }
+.wb-change-head:hover { color: var(--wb-text); }
+.wb-change-head:focus-visible { outline: 2px solid var(--wb-selection); outline-offset: -2px; }
 
 /* the server left the proposal pending (`bad_diagram`): the message sits above the textarea */
 .wb-diagram-error {

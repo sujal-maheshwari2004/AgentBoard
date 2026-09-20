@@ -1,6 +1,7 @@
 import { useState } from 'react'
 import { store } from '../state/store'
 import { getWiring } from '../sync/wire'
+import { useModalDialog } from './useModalDialog'
 
 export function PastePlanButton() {
   const [open, setOpen] = useState(false)
@@ -16,6 +17,8 @@ export function PastePlanButton() {
 
 export function PastePlanModal({ onClose }: { onClose: () => void }) {
   const [text, setText] = useState('')
+  // Esc closes it: nothing has been sent yet (B.S6 #9)
+  const dialogRef = useModalDialog<HTMLDivElement>({ onEscape: onClose })
   const submit = () => {
     const t = text.trim()
     const w = getWiring()
@@ -26,7 +29,7 @@ export function PastePlanModal({ onClose }: { onClose: () => void }) {
   }
   return (
     <div className="wb-modal-backdrop" onPointerDown={(e) => e.stopPropagation()}>
-      <div className="wb-modal" role="dialog" aria-label="Paste plan">
+      <div className="wb-modal" role="dialog" aria-modal="true" aria-label="Paste plan" tabIndex={-1} ref={dialogRef}>
         <h2>Paste plan</h2>
         <div className="meta">
           A <code>flowchart</code> mermaid block or frontmatter markdown is ingested directly; anything else is logged and

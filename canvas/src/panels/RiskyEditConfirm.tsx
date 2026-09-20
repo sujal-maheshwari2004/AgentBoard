@@ -1,6 +1,7 @@
 import { useState } from 'react'
 import { store, useStore } from '../state/store'
 import { getWiring } from '../sync/wire'
+import { useModalDialog } from './useModalDialog'
 
 /**
  * `risky_edit.request` → summary + diff; approve needs an explanation → `risky_edit.reply`.
@@ -16,6 +17,8 @@ export function RiskyEditConfirm() {
 
 function RiskyDialog(props: { requestId: string; summary: string; diff: string; affected: string[]; remaining: number }) {
   const [note, setNote] = useState('')
+  // focus trap only: the most destructive modal must not be dismissable by a stray Esc (B.S6 #9)
+  const dialogRef = useModalDialog<HTMLDivElement>()
   const reply = (approved: boolean) => {
     const w = getWiring()
     if (!w) return
@@ -26,7 +29,7 @@ function RiskyDialog(props: { requestId: string; summary: string; diff: string; 
   }
   return (
     <div className="wb-modal-backdrop" onPointerDown={(e) => e.stopPropagation()}>
-      <div className="wb-modal" role="dialog" aria-label="Risky edit">
+      <div className="wb-modal" role="dialog" aria-modal="true" aria-label="Risky edit" tabIndex={-1} ref={dialogRef}>
         <h2>Risky edit — confirm</h2>
         <div className="meta">
           {props.remaining > 0 && <span className="wb-queue">{props.remaining} more queued · </span>}

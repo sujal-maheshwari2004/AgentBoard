@@ -1,8 +1,19 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useMemo, useState } from 'react'
 import { store, useStore } from '../state/store'
+import { isBoardName } from '../sync/boards'
 import { getWiring } from '../sync/wire'
 import type { DiagramRequest } from '../state/types'
-import { boardTitle, changeSummary, diagramChangeLines, diagramReplyPayload } from './diagramChanges'
+import { focusBoard } from './BoardSwitcher'
+import {
+  boardTitle,
+  changeSummary,
+  diagramChangeLines,
+  diagramReplyPayload,
+  groupChangeLines,
+  shouldGroupChanges,
+  type ChangeLine,
+} from './diagramChanges'
+import { useModalDialog } from './useModalDialog'
 
 /**
  * B.10 — root proposes a board, the owner approves it. Nothing reaches `.whiteboard/plan/`
@@ -63,15 +74,48 @@ function DiagramDialog({ req, remaining }: { req: DiagramRequest; remaining: num
     store.note('diagram', `${approved ? 'approved' : 'rejected'} ${req.name} (req ${req.request_id})${payload.mermaid ? ' with edits' : ''}`)
   }
 
+  /**
+   * Esc = Reject WITHOUT sending (B.S6 item 9): the modal closes and the proposal stays pending
+   * on the server, so `client.hello` brings it straight back. Nothing is written either way.
+   */
+  const dismiss = () => {
+    if (pending) return
+    store.removeDiagramRequest(req.request_id)
+    store.note('diagram', `dismissed ${req.name} (req ${req.request_id}) — still pending on the server`)
+  }
+  const dialogRef = useModalDialog<HTMLDivElement>({ onEscape: dismiss })
+
   const lines = diagramChangeLines(req)
+  const grouped = shouldGroupChanges(lines)
+  const groups = useMemo(() => groupChangeLines(lines), [req])
   const summary = changeSummary(req)
   const textId = `wb-mermaid-${req.request_id}`
   const noteId = `wb-note-${req.request_id}`
+  const titleId = `wb-diagram-title-${req.request_id}`
+
+  /** B.S6 item 11: pan the camera to the board being proposed, behind the modal */
+  const showMe = () => {
+    const editor = getWiring()?.editor
+    if (editor && isBoardName(req.name)) focusBoard(editor, req.name)
+  }
 
   return (
     <div className="wb-modal-backdrop" onPointerDown={(e) => e.stopPropagation()}>
-      <div className="wb-modal wb-diagram" role="dialog" aria-label="Diagram proposal">
-        <h2>Proposed diagram: {boardTitle(req.name)}</h2>
+      <div className="wb-modal wb-diagram" role="dialog" aria-modal="true" aria-labelledby={titleId} tabIndex={-1} ref={dialogRef}>
+        <h2 id={titleId}>
+          Proposed diagram: {boardTitle(req.name)}
+          {isBoardName(req.name) && (
+            <button
+              type="button"
+              className="wb-btn wb-showme"
+              title={`Move the canvas to the ${req.name.toUpperCase()} board behind this dialog`}
+              aria-label={`Show me the ${req.name.toUpperCase()} board`}
+              onClick={showMe}
+            >
+              Show me
+            </button>
+          )}
+        </h2>
         <div className="meta">
           board <code>{req.name}</code> · request <code>{req.request_id}</code>
           {summary ? ` · ${summary}` : ''}
@@ -83,24 +127,13 @@ function DiagramDialog({ req, remaining }: { req: DiagramRequest; remaining: num
           </p>
         )}
 
-        <h3>Changes</h3>
-        <div className="wb-changes">
-          {lines.length === 0 ? (
-            <div className="wb-change none">no changes — the board already matches this diagram</div>
-          ) : (
-            lines.map((l) => (
-              <div key={l.key} className={`wb-change ${l.tone}`}>
-                <span className="sign" aria-hidden="true">
-                  {l.sign}
-                </span>
-                <code>{l.text}</code>
-                <span className="what">
-                  {l.tone} {l.what}
-                </span>
-                {l.detail && <span className="detail">{l.detail}</span>}
-              </div>
-            ))
-          )}
+        <h3>Changes{lines.length ? ` (${lines.length})` : ''}</h3>
+        <div className={`wb-changes${grouped ? ' grouped' : ''}`} data-testid="diagram-changes">
+          {lines.length === 0 && <div className="wb-change none">no changes — the board already matches this diagram</div>}
+          {lines.length > 0 &&
+            (grouped
+              ? groups.map((g) => <ChangeGroupBlock key={g.key} title={g.title} tone={g.tone} lines={g.lines} defaultOpen={g.defaultOpen} />)
+              : lines.map((l) => <ChangeRow key={l.key} line={l} />))}
         </div>
 
         {errorText && (
@@ -143,6 +176,7 @@ function DiagramDialog({ req, remaining }: { req: DiagramRequest; remaining: num
 
         <div className="actions">
           {pending && <span className="wb-queue">sending…</span>}
+          <span className="wb-queue wb-esc-hint">Esc closes this and leaves the proposal pending</span>
           <button className="wb-btn danger" disabled={pending} onClick={() => reply(false)}>
             Reject
           </button>
@@ -151,6 +185,56 @@ function DiagramDialog({ req, remaining }: { req: DiagramRequest; remaining: num
           </button>
         </div>
       </div>
+    </div>
+  )
+}
+
+function ChangeRow({ line }: { line: ChangeLine }) {
+  return (
+    <div className={`wb-change ${line.tone}`}>
+      <span className="sign" aria-hidden="true">
+        {line.sign}
+      </span>
+      <code>{line.text}</code>
+      {/* the spoken half of the +/− encoding: colour is never the only signal (B.1 item 12) */}
+      <span className="what">
+        {line.tone} {line.what}
+      </span>
+      {line.detail && <span className="detail">{line.detail}</span>}
+    </div>
+  )
+}
+
+/** one collapsible bucket of a large diff (B.S6 item 10) */
+function ChangeGroupBlock({
+  title,
+  tone,
+  lines,
+  defaultOpen,
+}: {
+  title: string
+  tone: 'added' | 'removed'
+  lines: ChangeLine[]
+  defaultOpen: boolean
+}) {
+  const [open, setOpen] = useState(defaultOpen)
+  return (
+    <div className={`wb-change-group ${tone}`}>
+      <button
+        type="button"
+        className="wb-change-head"
+        aria-expanded={open}
+        title={`${open ? 'Collapse' : 'Expand'} ${title}`}
+        aria-label={`${open ? 'Collapse' : 'Expand'} ${title}`}
+        onClick={() => setOpen((v) => !v)}
+      >
+        <span aria-hidden="true">{open ? '▾' : '▸'}</span>
+        <span className="sign" aria-hidden="true">
+          {tone === 'added' ? '+' : '−'}
+        </span>
+        <span>{title}</span>
+      </button>
+      {open && lines.map((l) => <ChangeRow key={l.key} line={l} />)}
     </div>
   )
 }

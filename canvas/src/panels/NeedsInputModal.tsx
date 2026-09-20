@@ -2,6 +2,7 @@ import { useEffect, useState } from 'react'
 import { store, useStore } from '../state/store'
 import { getWiring } from '../sync/wire'
 import type { NeedsInputPrompt } from '../state/types'
+import { useModalDialog } from './useModalDialog'
 
 /** Queue of `needs_input` prompts; one shown at a time. */
 export function NeedsInputModal() {
@@ -19,6 +20,8 @@ export function NeedsInputModal() {
 function PromptDialog({ prompt, remaining }: { prompt: NeedsInputPrompt; remaining: number }) {
   const [text, setText] = useState('')
   useEffect(() => setText(''), [prompt.prompt_id])
+  // focus trap only: a prompt has no "dismiss" — the agent is waiting for an answer (B.S6 #9)
+  const dialogRef = useModalDialog<HTMLDivElement>()
 
   const reply = (value: unknown) => {
     const w = getWiring()
@@ -30,7 +33,7 @@ function PromptDialog({ prompt, remaining }: { prompt: NeedsInputPrompt; remaini
 
   return (
     <div className="wb-modal-backdrop" onPointerDown={(e) => e.stopPropagation()}>
-      <div className="wb-modal" role="dialog" aria-label="Agent needs input">
+      <div className="wb-modal" role="dialog" aria-modal="true" aria-label="Agent needs input" tabIndex={-1} ref={dialogRef}>
         <h2>{prompt.agent_id} needs input</h2>
         <div className="meta">
           {prompt.node_id ? `on ${prompt.node_id} · ` : ''}
