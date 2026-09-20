@@ -34,12 +34,19 @@ def render_job_spec(
     dependents: list[Node],
     project_root: Path,
     collaboration_rel: str = ".whiteboard/COLLABORATION.md",
+    agent_id: str | None = None,
 ) -> str:
-    """The job spec handed to the subagent working on `node`."""
+    """The job spec handed to the subagent working on `node`.
+
+    `agent_id` is substituted into every tool call so the spec is self-sufficient even for a
+    `general-purpose` agent; without it the calls keep the `<your agent id>` placeholder.
+    """
     root = Path(project_root)
     node_path = root / (node.path or node_rel_path(node))
     collab_path = root / collaboration_rel
     plan_path = root / ".whiteboard" / "PLAN.md"
+    aid_arg = f'"{agent_id}"' if agent_id else "<your agent id>"
+    agent_dir = root / ".whiteboard" / "agents" / (agent_id or "<your agent id>")
 
     body = node.body.strip()
     goal_lines = [f"**{node.title}** (`{node.id}`, type `{node.type}`)"]
@@ -73,10 +80,14 @@ def render_job_spec(
         "",
         "Use the `whiteboard` MCP server, tool names exactly as written:",
         "",
-        f'1. First thing: `mcp__whiteboard__set_agent_status(agent_id=<your agent id>, status="working")`.',
-        f'2. Questions for the human: `mcp__whiteboard__ask_user(agent_id=<your agent id>, question=..., node_id="{node.id}")`, '
+        "If the `mcp__whiteboard__*` tools are not available in your session, stop immediately and say which "
+        "tool is missing in your final message: without them nothing you do is recorded and the root session "
+        "cannot see you.",
+        "",
+        f'1. First thing: `mcp__whiteboard__set_agent_status(agent_id={aid_arg}, status="working")`.',
+        f'2. Questions for the human: `mcp__whiteboard__ask_user(agent_id={aid_arg}, question=..., node_id="{node.id}")`, '
         "then poll `mcp__whiteboard__get_reply(prompt_id=...)`.",
-        f'3. Last thing: `mcp__whiteboard__append_event(agent_id=<your agent id>, node_id="{node.id}", type="done", note=<what landed + test counts>)` '
+        f'3. Last thing: `mcp__whiteboard__append_event(agent_id={aid_arg}, node_id="{node.id}", type="done", note=<what landed + test counts>)` '
         '— or `type="blocked"` / `type="needs_input"` with a note explaining why.',
         "",
         "`done` marks the node done and notifies the agents that depend on it; do not call it before your tests pass.",
@@ -92,6 +103,43 @@ def render_job_spec(
         "## Dependents waiting on you",
         "",
         _bullets(dependent_lines, "- (none)") if dependent_lines else "- (none)",
+        "",
+        "## Progress reporting",
+        "",
+        f"`mcp__whiteboard__report_progress(agent_id={aid_arg}, activity=<one short present-tense line>, "
+        'progress=<0.0-1.0>, metrics={"tool_calls": <n>, "elapsed_s": <n>}, '
+        "files_touched=[<paths changed since your last report>])`",
+        "",
+        "Call it at every milestone:",
+        "",
+        "1. after reading this spec, the node and every dependency (`progress ≈ 0.1`);",
+        "2. after each file or coherent group of files lands;",
+        "3. before the test run and again after it;",
+        "4. immediately before `done` (`progress = 1.0`).",
+        "",
+        "`files_touched` is deduped and accumulated server-side. `tokens_in`, `tokens_out` and `cost_usd` "
+        "are filled in by the root session — do not send them.",
+        "",
+        "The human watches this live. Never report progress you have not made.",
+        "",
+        "## Chat",
+        "",
+        "Owner chat reaches you as a message telling you to answer. Answer in your own thread: "
+        f"`mcp__whiteboard__chat_reply(from_id={aid_arg}, text=<your answer>)`.",
+        "",
+        "Your final message is not a reply — it is not read until you exit. Never post in another agent's "
+        "thread and never answer on the owner's behalf in the `root` thread.",
+        "",
+        "## If your plan changes",
+        "",
+        "If you must deviate from this spec, rewrite it first: "
+        f"`mcp__whiteboard__write_agent_plan(agent_id={aid_arg}, plan_md=<updated spec>)`. The spec on disk "
+        "must always describe what you are actually doing.",
+        "",
+        "If the owner edits your plan mid-run you are told the event number N. Stop what you are doing, "
+        f"re-read `{agent_dir / 'plan.md'}` in full, then acknowledge with "
+        f"`mcp__whiteboard__report_progress(agent_id={aid_arg}, activity=<what changes>, ack_event_seq=N)` "
+        "**before** doing anything else.",
         "",
         "## Scope rules",
         "",

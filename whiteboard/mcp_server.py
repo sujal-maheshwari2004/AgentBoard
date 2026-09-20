@@ -516,7 +516,7 @@ def build_mcp_server(store: PlanStore, log: EventLog, bus: Bus, root: Path) -> M
         if spec is None:
             deps = [store.nodes[d] for d in node.depends_on if d in store.nodes]
             dependents = [store.nodes[d] for d in Graph(store.nodes).dependents(node_id)]
-            spec = render_job_spec(node, deps, dependents, root)
+            spec = render_job_spec(node, deps, dependents, root, agent_id=agent_id)
         store.upsert_agent(agent_id, node_id, status="idle", plan_md=spec)
         publish_store()  # agent.card.upsert
         request_id = uuid.uuid4().hex[:8]
