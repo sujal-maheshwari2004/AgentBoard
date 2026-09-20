@@ -326,9 +326,13 @@ def build_mcp_server(store: PlanStore, log: EventLog, bus: Bus, root: Path) -> M
         depends_on: list[str] | None = None,
         interfaces: list[str | dict] | None = None,
         body: str | None = None,
-        diagram: str = "hld",
+        diagram: str | None = None,
     ) -> dict:
-        """Create or update a node file; depends_on is synced into the diagrams and PLAN.md."""
+        """Create or update a node file; depends_on is synced into the diagrams and PLAN.md.
+
+        `diagram` is an extra board to draw the node on; every node is always
+        on its type's board (hld | lld | er).
+        """
         validate_node_id(id)
         existed = store.get_node(id) is not None
         node = store.upsert_node(

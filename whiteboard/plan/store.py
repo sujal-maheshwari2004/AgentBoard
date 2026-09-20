@@ -11,14 +11,27 @@ Reconciliation rules (see CONTRACTS §0/§1):
 
 * frontmatter ``depends_on`` is authoritative; diagrams are projections of it
   and are rewritten (only when the serialized text differs);
-* a diagram box with no node file creates one (``type: er`` for ``er.md``,
-  else ``hld``; title = box label; status ``todo``);
+* a diagram box with no node file creates one (its type is the board's name
+  when that name is a node type — ``hld``/``lld``/``er`` — else ``hld``;
+  title = box label; status ``todo``);
 * on ``load()`` diagram edges and frontmatter deps are *unioned* (the server
   may have been down while either side was edited); afterwards an edit to
   either side propagates to the other with set semantics;
-* a node's *home* diagram is ``er`` for ``type: er`` (when ``er.md`` exists)
-  and ``hld`` otherwise; regeneration adds every node to its home diagram and
-  keeps nodes already drawn in any other diagram.
+
+Boards (CONTRACTS §0). A *board* is one of ``hld``, ``lld`` and ``er``: the
+three framed regions of the canvas, backed by ``plan/<name>.md``. Node types
+and board names share that vocabulary, and:
+
+* ``home(node) = node.type`` when ``plan/<type>.md`` exists and parses, else
+  ``"hld"``; regeneration adds every node to its home board and keeps nodes
+  already drawn in any other diagram;
+* an edge is attributed to the first board (order ``hld, lld, er`` then
+  alphabetically) whose fence holds both endpoints, otherwise to
+  ``home(src)``; a board's mermaid therefore only carries edges whose two
+  endpoints are both drawn on it, while cross-board edges live in the node
+  frontmatter and in ``PlanSnapshot.edges``;
+* ``PLAN.md`` shows the *full* flowchart (every node and edge) plus one
+  section per board.
 """
 
 from __future__ import annotations
@@ -68,7 +81,7 @@ from whiteboard.plan.model import (
 from whiteboard.plan.risk import NodeSemantics, classify_ops, describe, diff_node, is_risky, op_kind
 from whiteboard.scaffold import TEMPLATES_DIR
 
-__all__ = ["PlanStore", "OpsResult", "ServerMessage", "DiagramState", "CACHE_VERSION"]
+__all__ = ["PlanStore", "OpsResult", "ServerMessage", "DiagramState", "BOARDS", "CACHE_VERSION"]
 
 log = logging.getLogger(__name__)
 
@@ -76,7 +89,21 @@ ServerMessage = dict[str, Any]
 
 CACHE_VERSION = 1
 DIAGRAM_NAME_RE = re.compile(r"^[a-z0-9][a-z0-9-]*$")
+#: The three canvas boards, in display order. Other ``plan/*.md`` diagrams sort
+#: alphabetically after them.
+BOARDS: tuple[str, ...] = ("hld", "lld", "er")
 _UNSET: Any = object()
+
+
+def _board_order(name: str) -> tuple[int, str]:
+    """Sort key: ``hld``, ``lld``, ``er``, then everything else alphabetically."""
+    return (BOARDS.index(name), "") if name in BOARDS else (len(BOARDS), name)
+
+
+def _type_for_diagram(name: str) -> str:
+    """The node type a box on ``plan/<name>.md`` gets: the board's own name
+    when it is a node type, else ``hld``."""
+    return name if name in NODE_TYPES else "hld"
 
 
 @dataclass
@@ -239,8 +266,8 @@ class PlanStore:
                 self.diagrams[state.name] = state
         if "hld" not in self.diagrams:
             self.diagrams["hld"] = self._new_diagram_state("hld")
-        # hld first, then the rest alphabetically: it is the diagram PLAN.md shows.
-        self.diagrams = {k: self.diagrams[k] for k in sorted(self.diagrams, key=lambda n: (n != "hld", n))}
+        # The three boards first, in canvas order, then the rest alphabetically.
+        self.diagrams = {k: self.diagrams[k] for k in sorted(self.diagrams, key=_board_order)}
 
         self.agents = {}
         for card_path in sorted(self.agents_dir.glob("*/card.md")):
@@ -330,7 +357,9 @@ class PlanStore:
 
     # ------------------------------------------------------- reconciliation
     def _home_diagram(self, node: Node) -> str:
-        return "er" if node.type == "er" and "er" in self.diagrams else "hld"
+        """``node.type`` when that board exists and parses, else ``hld``."""
+        state = self.diagrams.get(node.type)
+        return node.type if state is not None and state.doc is not None else "hld"
 
     def _diagram_nodes(self, name: str, doc: MermaidDoc) -> dict[str, Node]:
         """Nodes a diagram must show: those homed there plus those already drawn."""
@@ -339,10 +368,13 @@ class PlanStore:
         }
 
     def _diagram_for(self, src: str, dst: str) -> str:
+        """The first board holding both endpoints; otherwise the source's home
+        board (a cross-board edge is attributed to where it starts)."""
         for name, state in self.diagrams.items():
             if state.doc is not None and src in state.doc.nodes and dst in state.doc.nodes:
                 return name
-        return "hld"
+        node = self.nodes.get(src)
+        return self._home_diagram(node) if node is not None else "hld"
 
     def _reconcile_diagram(
         self, name: str, doc: MermaidDoc, nodes: dict[str, Node], *, mode: str
@@ -368,7 +400,7 @@ class PlanStore:
             if bid not in nodes:
                 nodes[bid] = Node(
                     id=bid,
-                    type="er" if name == "er" else "hld",
+                    type=_type_for_diagram(name),
                     title=box.label or bid,
                     path=self._node_rel(bid),
                 )
@@ -471,12 +503,17 @@ class PlanStore:
                 self._write(state.path, wanted)
                 state.on_disk = True
 
-    def _hld_mermaid(self) -> str:
-        state = self.diagrams.get("hld")
-        return state.mermaid if state is not None else serialize(diagram_from_nodes(self.nodes, None))
+    def _full_mermaid(self) -> str:
+        """Every node and edge in one flowchart, built from a *sorted* node map
+        so a reload regenerates byte-identical text (no write on load)."""
+        return serialize(diagram_from_nodes(dict(sorted(self.nodes.items())), None))
+
+    def _boards(self) -> dict[str, str]:
+        return {name: s.mermaid for name, s in self.diagrams.items() if s.doc is not None}
 
     def _regen_plan_md(self) -> None:
-        self._write(self.wb / "PLAN.md", render_plan_md(self.nodes, self.agents, self._hld_mermaid()))
+        text = render_plan_md(self.nodes, self.agents, self._full_mermaid(), boards=self._boards())
+        self._write(self.wb / "PLAN.md", text)
 
     def regenerate_plan_md(self) -> None:
         self._regen_plan_md()
@@ -847,7 +884,7 @@ class PlanStore:
                 diagram = str(op.get("diagram") or "hld")
                 nodes[nid] = Node(
                     id=nid,
-                    type="er" if diagram == "er" else "hld",
+                    type=_type_for_diagram(diagram),
                     title=label or nid,
                     path=self._node_rel(nid),
                 )

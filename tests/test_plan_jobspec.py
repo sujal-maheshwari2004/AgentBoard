@@ -61,7 +61,27 @@ def test_render_plan_md():
     assert "Parse flowcharts." not in md  # bodies live in node files, not PLAN.md
 
 
+def test_render_plan_md_boards():
+    files, parser, store = nodes()
+    hld = "flowchart TD\n    node-files[Files layer]\n    node-store[Plan store]\n"
+    md = render_plan_md(
+        {n.id: n for n in (files, parser, store)},
+        {},
+        "flowchart TD\n    node-files[Files layer]\n",
+        boards={"hld": hld, "lld": "flowchart TD\n    node-parser[Mermaid parser]\n", "er": ""},
+    )
+    assert "## Boards" in md and md.index("## Flowchart") < md.index("## Boards") < md.index("## Node details")
+    for name in ("HLD", "LLD", "ER"):
+        assert f"### {name} (`plan/{name.lower()}.md`)" in md
+    assert md.index("### HLD") < md.index("### LLD") < md.index("### ER")
+    assert "```mermaid\n" + hld.rstrip("\n") + "\n```" in md
+    # an empty board still renders a valid (empty) flowchart fence
+    assert md[md.index("### ER"):].startswith("### ER (`plan/er.md`)\n\n```mermaid\nflowchart TD\n```\n")
+    assert "(no boards)" not in md
+
+
 def test_render_plan_md_empty():
     md = render_plan_md({}, {}, "")
     assert "(no nodes yet)" in md and "(no agents yet)" in md
     assert "```mermaid\nflowchart TD\n```" in md
+    assert "## Boards" in md and "(no boards)" in md

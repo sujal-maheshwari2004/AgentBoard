@@ -187,6 +187,20 @@ def test_external_diagram_er_creates_er_nodes(root: Path, store: PlanStore) -> N
     assert er_inner == "flowchart LR\n    node-users[(Users)]\n    node-orders[(Orders)]\n    node-users --> node-orders\n"
 
 
+def test_external_diagram_lld_creates_lld_nodes(root: Path, store: PlanStore) -> None:
+    lld = _wb(root) / "plan" / "lld.md"
+    lld.write_text("# LLD\n\n```mermaid\nflowchart TD\n    node-cache[Cache] --> node-queue[Queue]\n```\n")
+    msgs = _change(store, lld)
+    assert _types(msgs) == ["plan.node.upsert", "plan.node.upsert", "plan.edge.upsert", "event.external"]
+    assert store.get_node("node-cache").type == "lld" and store.get_node("node-queue").type == "lld"
+    assert store.get_node("node-queue").depends_on == ["node-cache"]
+    assert msgs[2]["payload"]["edge"]["diagram"] == "lld"
+    assert "node-cache" not in _hld_inner(root)
+    assert extract_mermaid_blocks(lld.read_text())[0][2] == (
+        "flowchart TD\n    node-cache[Cache]\n    node-queue[Queue]\n    node-cache --> node-queue\n"
+    )
+
+
 def test_external_diagram_parse_error_keeps_state(root: Path, store: PlanStore) -> None:
     hld = _hld(root)
     good = hld.read_text()

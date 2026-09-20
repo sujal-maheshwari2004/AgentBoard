@@ -165,7 +165,7 @@ async def test_upsert_nodes_and_read_plan(h: Harness, root: Path) -> None:
         ("node-a", "node-b"), ("node-a", "node-c"), ("node-b", "node-c")
     }
     assert plan["project"] == root.name and plan["agents"] == []
-    assert {d["name"] for d in plan["diagrams"]} == {"hld", "er"}
+    assert {d["name"] for d in plan["diagrams"]} == {"hld", "lld", "er"}
     assert (_wb(root) / "plan" / "nodes" / "node-c.md").exists()
     # each upsert published the store's messages and appended a node_changed event
     events = await h.call("get_events")

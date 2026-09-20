@@ -23,6 +23,7 @@ _WHITEBOARD_FILES: tuple[tuple[str, str | None], ...] = (
     (".whiteboard/PLAN.md", "PLAN.md"),
     (".whiteboard/COLLABORATION.md", "COLLABORATION.md"),
     (".whiteboard/plan/hld.md", "hld.md"),
+    (".whiteboard/plan/lld.md", "lld.md"),
     (".whiteboard/plan/er.md", "er.md"),
     (".whiteboard/plan/nodes/.gitkeep", None),
     (".whiteboard/agents/.gitkeep", None),
