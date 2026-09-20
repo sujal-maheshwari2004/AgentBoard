@@ -47,3 +47,13 @@
     animation: none;
   }
 }
+
+/*
+ * Cross-board edges (plan B.4/B.5): the endpoints live in different board frames, so the arrow is
+ * parented to the page and drawn thinner and faded — a secondary line between two regions, not a
+ * dependency inside one. Same `data-wb-edge` mechanism, one extra attribute.
+ */
+.tl-shape[data-wb-edge][data-wb-cross] .tl-svg-container > g {
+  stroke-width: calc(1.5px / var(--wb-zoom, 1));
+  opacity: 0.4;
+}

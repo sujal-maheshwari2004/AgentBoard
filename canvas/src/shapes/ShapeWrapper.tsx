@@ -6,10 +6,12 @@ import { DefaultShapeWrapper, type TLShapeWrapperProps } from 'tldraw'
 import { edgeState } from '../sync/apply'
 
 export const WbShapeWrapper = forwardRef<HTMLDivElement, TLShapeWrapperProps>(function WbShapeWrapper(props, ref) {
-  const meta = props.shape.meta as { kind?: string; srcStatus?: string; dstStatus?: string } | undefined
+  const meta = props.shape.meta as { kind?: string; srcStatus?: string; dstStatus?: string; cross?: boolean } | undefined
   const extra: Record<string, string> = {}
   if (meta?.kind === 'edge') {
     extra['data-wb-edge'] = edgeState(String(meta.srcStatus ?? 'todo'), String(meta.dstStatus ?? 'todo'))
+    // B.5: the endpoints sit on different boards — same mechanism, one extra attribute
+    if (meta.cross) extra['data-wb-cross'] = '1'
   }
   return <DefaultShapeWrapper ref={ref} {...props} {...extra} />
 })

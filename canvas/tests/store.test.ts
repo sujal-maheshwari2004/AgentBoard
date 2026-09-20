@@ -21,7 +21,7 @@ describe('reducer', () => {
     expect(Object.keys(s.nodes)).toHaveLength(6)
     expect(s.edges['node-files__node-parser']).toMatchObject({ src: 'node-files', dst: 'node-parser' })
     expect(Object.keys(s.agents)).toEqual(['agent-files', 'agent-parser'])
-    expect(s.diagram).toBe('hld')
+    expect(s.activeBoard).toBe('hld')
     expect(s.layout.hld.frames?.['plan-board']).toMatchObject({ w: 1000, h: 700 })
     expect(s.ticker.at(-1)?.kind).toBe('snapshot')
   })

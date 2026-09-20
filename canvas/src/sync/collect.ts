@@ -14,7 +14,8 @@ import {
   type JsonObject,
 } from 'tldraw'
 import { kindOf, remote, upsertEdge } from './apply'
-import { PLAN_FRAME_NAME, parseEdgeKey, provisionalNodeId, shapeMeta } from '../shapes/ids'
+import { boardNameFromKey } from './boards'
+import { parseEdgeKey, provisionalNodeId, shapeMeta } from '../shapes/ids'
 import type { EditOp, LayoutPatch, PlanEdge } from '../state/types'
 import { edgeKey } from '../state/types'
 
@@ -23,8 +24,27 @@ export interface ArrowEnds {
   end: TLShapeId | null
 }
 
+/**
+ * B.12: which kind of frame a shape sits in. `id` is the frame's `meta.planId` — the board's
+ * sidecar key (`board-hld`) or the agent id for an agent folder (B.S3).
+ */
+export interface FrameRef {
+  kind: 'board' | 'agent-folder'
+  id: string
+}
+
+/** pure: resolve a parent shape to a frame ref (null for the page or anything else) */
+export function frameRefOf(parent: TLShape | undefined): FrameRef | null {
+  const kind = parent?.meta?.kind
+  if (kind === 'plan-frame') return { kind: 'board', id: String(parent!.meta.planId) }
+  if (kind === 'agent-folder') return { kind: 'agent-folder', id: String(parent!.meta.planId) }
+  return null
+}
+
 export interface CollectContext {
-  frameId: TLShapeId
+  /** the frame a shape is parented to, or null when it is loose on the page */
+  frameKindOf(shape: TLShape): FrameRef | null
+  /** the active board — the fallback diagram for ops that name no board of their own */
   diagram: string
   plaintext(rt: TLRichText): string
   getShape(id: TLShapeId): TLShape | undefined
@@ -118,7 +138,15 @@ function boxChanged(from: TLShape, to: TLShape): boolean {
 function nodeLayoutEntry(ctx: CollectContext, s: TLShape) {
   const p = ctx.pageXY(s)
   const props = s.props as { w?: number; h?: number }
-  return { x: p.x, y: p.y, w: props.w, h: props.h, parent: s.parentId === ctx.frameId ? PLAN_FRAME_NAME : undefined, pinned: true }
+  const frame = ctx.frameKindOf(s)
+  return { x: p.x, y: p.y, w: props.w, h: props.h, parent: frame?.kind === 'board' ? frame.id : undefined, pinned: true }
+}
+
+/** the board a node shape lives on, for ops that must name one */
+function boardOfShapeIn(ctx: CollectContext, s: TLShape | undefined): string | null {
+  if (!s) return null
+  const frame = ctx.frameKindOf(s)
+  return frame?.kind === 'board' ? boardNameFromKey(frame.id) : null
 }
 
 export function deriveOps(ctx: CollectContext, pending: Pending): Derived {
@@ -134,11 +162,15 @@ export function deriveOps(ctx: CollectContext, pending: Pending): Derived {
   }
 
   const considerHumanGeo = (s: TLShape) => {
-    if (s.type !== 'geo' || kindOf(s) || s.parentId !== ctx.frameId) return
+    if (s.type !== 'geo' || kindOf(s)) return
+    // only a box drawn inside a BOARD becomes a plan node; one drawn in an agent folder (or
+    // loose on the page) is ignored — the folder's own editors change agent content (B.12)
+    const frame = ctx.frameKindOf(s)
+    if (frame?.kind !== 'board') return
     const label = geoLabel(ctx, s)
     if (!label) return
     const id = provisionalNodeId(label)
-    ops.push({ op: 'node-created', id, label, shape: mermaidShapeFor((s as TLGeoShape).props.geo), diagram: ctx.diagram })
+    ops.push({ op: 'node-created', id, label, shape: mermaidShapeFor((s as TLGeoShape).props.geo), diagram: boardNameFromKey(frame.id) })
     stamps.push({ id: s.id, type: s.type, meta: shapeMeta('plan-node', id, { provisional: true }) })
     layout.nodes![id] = nodeLayoutEntry(ctx, s)
     touchedLayout = true
@@ -242,10 +274,11 @@ export function deriveOps(ctx: CollectContext, pending: Pending): Derived {
       stamps.push({ id: arrow.id, type: 'arrow', meta: { ...arrow.meta, planId: edgeKey(from, to) } })
     } else if (!kind) {
       const label = ctx.plaintext((arrow.props as { richText: TLRichText }).richText).trim()
-      const op: EditOp = { op: 'edge-created', from, to, diagram: ctx.diagram }
+      const diagram = boardOfShapeIn(ctx, ends.start ? ctx.getShape(ends.start) : undefined) ?? ctx.diagram
+      const op: EditOp = { op: 'edge-created', from, to, diagram }
       if (label) op.label = label
       ops.push(op)
-      stamps.push({ id: arrow.id, type: 'arrow', meta: shapeMeta('edge', edgeKey(from, to), { diagram: ctx.diagram, provisional: true }) })
+      stamps.push({ id: arrow.id, type: 'arrow', meta: shapeMeta('edge', edgeKey(from, to), { diagram, provisional: true }) })
     }
   }
 
@@ -273,9 +306,9 @@ export interface CollectorOptions {
   layoutDebounceMs?: number
 }
 
-export function liveContext(editor: Editor, frameId: TLShapeId, diagram: string): CollectContext {
+export function liveContext(editor: Editor, diagram: string): CollectContext {
   return {
-    frameId,
+    frameKindOf: (shape) => frameRefOf(editor.getShape(shape.parentId as TLShapeId)),
     diagram,
     plaintext: (rt) => renderPlaintextFromRichText(editor, rt),
     getShape: (id) => editor.getShape(id),
@@ -294,7 +327,7 @@ export function liveContext(editor: Editor, frameId: TLShapeId, diagram: string)
   }
 }
 
-export function installCollector(editor: Editor, frameId: TLShapeId, opts: CollectorOptions): () => void {
+export function installCollector(editor: Editor, opts: CollectorOptions): () => void {
   const pending = emptyPending()
   let opsTimer: ReturnType<typeof setTimeout> | null = null
   let layoutTimer: ReturnType<typeof setTimeout> | null = null
@@ -313,7 +346,7 @@ export function installCollector(editor: Editor, frameId: TLShapeId, opts: Colle
   const flushOps = () => {
     opsTimer = null
     if (disposed) return
-    const ctx = liveContext(editor, frameId, opts.getDiagram())
+    const ctx = liveContext(editor, opts.getDiagram())
     const derived = deriveOps(ctx, pending)
     pending.added.clear()
     pending.updated.clear()
