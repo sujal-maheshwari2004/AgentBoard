@@ -75,6 +75,25 @@ export interface PlanEvent {
   data?: Record<string, unknown>
 }
 
+/**
+ * §6 `chat.message` — one per `chat` event, projected by the server's `Bus`. The last 50 per
+ * thread are replayed on `client.hello` BEFORE the event replay, so backfill and live traffic
+ * overlap on every reconnect: the client dedupes on `id` and never builds threads from
+ * `event.append` (B.9 / A.4).
+ */
+export interface ChatMessage {
+  id: string
+  /** `'root'` or an agent id */
+  thread: string
+  from: string
+  to?: string | null
+  text: string
+  ts: string
+  seq: number
+  reply_to?: string | null
+  node_id?: string | null
+}
+
 export interface Diagram {
   name: string
   direction: string
@@ -157,6 +176,7 @@ export type ServerMessage =
   | Envelope<'layout.update', { diagram: string; layout: Layout }>
   | Envelope<'server.error', { forSeq?: number; code: string; message: string }>
   | Envelope<'bridge.status', BridgeStatus>
+  | Envelope<'chat.message', ChatMessage>
 
 export type ServerMessageType = ServerMessage['type']
 
@@ -164,7 +184,8 @@ export interface ClientPayloads {
   'client.hello': { clientId: string; lastSeq: number; protocol: 1 }
   'canvas.edit': { ops: EditOp[] }
   'canvas.layout': { diagram: string; patch: LayoutPatch }
-  'chat.message': { text: string; agentId?: string; nodeId?: string }
+  /** B.9: `thread` is `'root'` or an agent id; `reply_to` is a `chat.message` id */
+  'chat.message': { text: string; agentId?: string; nodeId?: string; thread?: string; reply_to?: string }
   'plan.paste': { text: string }
   'prompt.reply': { prompt_id: string; value: unknown }
   'dispatch.reply': { request_id: string; approved: boolean; note?: string }
@@ -184,6 +205,7 @@ export const SERVER_MESSAGE_TYPES: ServerMessageType[] = [
   'plan.snapshot', 'plan.node.upsert', 'plan.node.delete', 'plan.edge.upsert', 'plan.edge.delete',
   'agent.card.upsert', 'agent.card.delete', 'event.append', 'needs_input', 'dispatch.request',
   'risky_edit.request', 'edit.ack', 'edit.reject', 'layout.update', 'server.error', 'bridge.status',
+  'chat.message',
 ]
 
 export function edgeKey(src: string, dst: string): string {
