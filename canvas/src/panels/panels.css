@@ -245,3 +245,49 @@
   border-radius: var(--wb-r1);
   margin-right: var(--wb-s2);
 }
+
+/* ---------- board switcher (B.5): one tinted segment per board, the active one filled ---------- */
+
+.wb-boards {
+  display: inline-flex;
+  align-items: stretch;
+  border: 1px solid var(--wb-border-2);
+  border-radius: var(--wb-r2);
+  overflow: hidden;
+}
+
+.wb-board-seg {
+  font: 600 var(--wb-t2) / 1 var(--wb-font);
+  letter-spacing: 0.02em;
+  padding: 0 var(--wb-s4);
+  min-height: 24px;
+  border: 0;
+  border-left: 1px solid var(--wb-border-2);
+  background: var(--wb-island);
+  color: var(--wb-text-2);
+  cursor: pointer;
+}
+
+.wb-board-seg:first-child { border-left: 0; }
+.wb-board-seg:disabled { opacity: 0.5; cursor: default; }
+.wb-board-seg:focus-visible { outline: 2px solid var(--wb-selection); outline-offset: -2px; }
+
+/* hue per board — the hex fallback is declared before every oklch() use */
+.wb-board-seg[data-board='hld'] { --seg: var(--wb-hld-hex); --seg: var(--wb-hld); }
+.wb-board-seg[data-board='lld'] { --seg: var(--wb-lld-hex); --seg: var(--wb-lld); }
+.wb-board-seg[data-board='er']  { --seg: var(--wb-er-hex);  --seg: var(--wb-er); }
+
+.wb-board-seg:not(.active) { color: var(--seg); }
+.wb-board-seg:not(.active):hover { background: color-mix(in srgb, var(--seg) 12%, var(--wb-island)); }
+
+.wb-board-seg.active {
+  background: var(--seg);
+  color: #fff;
+}
+
+/* the dark-mode board hues are lighter (Langfuse's inversion), so the fill takes dark text */
+:root[data-theme='dark'] .wb-board-seg.active { color: #171717; }
+
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme='light']) .wb-board-seg.active { color: #171717; }
+}

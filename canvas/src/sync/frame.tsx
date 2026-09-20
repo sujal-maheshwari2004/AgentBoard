@@ -1,44 +1,57 @@
-// Plan frame chrome: a folder button at the frame's top-left (rendered in page space through the
-// OnTheCanvas slot, so it pans/zooms with the page) that collapses/expands the board.
-import { useEditor, useValue, type Editor, type TLFrameShape, type TLShape } from 'tldraw'
+// Board chrome: one folder button per board frame, at the frame's top-left (rendered in page
+// space through the OnTheCanvas slot, so it pans/zooms with the page) that collapses/expands
+// that board.
+import { useEditor, useValue, type Editor, type TLFrameShape, type TLShape, type TLShapeId } from 'tldraw'
 import { getFrame, setFrameCollapsed } from './apply'
-import { PLAN_FRAME_NAME } from '../shapes/ids'
+import { boardFrameId, boardLayoutKey, boardOfFrameId, presentBoards, type BoardName } from './boards'
 import type { LayoutPatch } from '../state/types'
-
-export { PLAN_FRAME_NAME }
 
 /** pure: reads only the shape */
 export function getShapeVisibility(shape: TLShape): 'hidden' | 'inherit' {
   return shape.meta?.hidden ? 'hidden' : 'inherit'
 }
 
-type CollapseListener = (patch: LayoutPatch) => void
+/** `(board, patch)` — the collapse flag belongs to that board's sidecar */
+type CollapseListener = (board: string, patch: LayoutPatch) => void
 const listeners = new Set<CollapseListener>()
 
-/** the wiring subscribes here to persist `frames['plan-board'].collapsed` via canvas.layout */
+/** the wiring subscribes here to persist `frames['board-<name>'].collapsed` via canvas.layout */
 export function onFrameCollapse(fn: CollapseListener): () => void {
   listeners.add(fn)
   return () => listeners.delete(fn)
 }
 
-export function toggleFrame(editor: Editor): void {
-  const frame = getFrame(editor)
+export function toggleFrame(editor: Editor, frameId: TLShapeId): void {
+  const frame = getFrame(editor, frameId)
   if (!frame) return
-  const next = setFrameCollapsed(editor, !frame.meta.collapsed)
+  const next = setFrameCollapsed(editor, frameId, !frame.meta.collapsed)
   if (next) {
-    const patch: LayoutPatch = { frames: { [PLAN_FRAME_NAME]: next } }
-    listeners.forEach((l) => l(patch))
+    const board = boardOfFrameId(String(frameId)) ?? String(frame.meta.planId)
+    const patch: LayoutPatch = { frames: { [boardLayoutKey(board)]: next } }
+    listeners.forEach((l) => l(board, patch))
   }
 }
 
 export function FrameChrome() {
   const editor = useEditor()
-  const frame = useValue('plan-frame', () => getFrame(editor), [editor])
-  if (!frame) return null
-  return <FrameButton editor={editor} frame={frame} />
+  const boards = useValue('board frames', () => presentBoards(editor), [editor])
+  return (
+    <>
+      {boards.map((board) => (
+        <BoardHeader key={board} editor={editor} board={board} />
+      ))}
+    </>
+  )
 }
 
-function FrameButton({ editor, frame }: { editor: Editor; frame: TLFrameShape }) {
+function BoardHeader({ editor, board }: { editor: Editor; board: BoardName }) {
+  const frameId = boardFrameId(board)
+  const frame = useValue(`frame ${board}`, () => getFrame(editor, frameId), [editor, frameId])
+  if (!frame) return null
+  return <FrameButton editor={editor} frame={frame} board={board} />
+}
+
+function FrameButton({ editor, frame, board }: { editor: Editor; frame: TLFrameShape; board: BoardName }) {
   const collapsed = !!frame.meta.collapsed
   return (
     <div
@@ -58,24 +71,27 @@ function FrameButton({ editor, frame }: { editor: Editor; frame: TLFrameShape })
     >
       <button
         type="button"
-        title={collapsed ? 'Expand plan board' : 'Collapse plan board'}
+        title={collapsed ? `Expand the ${board.toUpperCase()} board` : `Collapse the ${board.toUpperCase()} board`}
+        aria-label={collapsed ? `Expand the ${board.toUpperCase()} board` : `Collapse the ${board.toUpperCase()} board`}
         onPointerDown={(e) => e.stopPropagation()}
         onClick={(e) => {
           e.stopPropagation()
-          toggleFrame(editor)
+          toggleFrame(editor, frame.id)
         }}
         style={{
           font: 'inherit',
           lineHeight: 1,
           padding: '3px 8px',
           border: '1px solid var(--wb-border-2)',
+          borderLeft: `4px solid var(--wb-${board}-hex)`,
           borderRadius: 'var(--wb-r2)',
           background: 'var(--wb-island)',
           color: 'var(--wb-text)',
           cursor: 'pointer',
         }}
       >
-        {collapsed ? '▸ 📁' : '▾ 📂'} {frame.props.name}
+        {/* the title is already on tldraw's own frame label — this is just the disclosure */}
+        {collapsed ? `▸ 📁 ${frame.props.name}` : '▾ 📂'}
       </button>
     </div>
   )

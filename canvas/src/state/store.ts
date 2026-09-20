@@ -6,6 +6,7 @@ import type {
   PlanNode, RiskyEditRequest, ServerMessage, SocketStatus,
 } from './types'
 import { edgeKey, primaryDiagram } from './types'
+import { DEFAULT_BOARD, isBoardName } from '../sync/boards'
 
 export interface TickerEntry {
   seq: number
@@ -22,7 +23,11 @@ export interface StoreState {
   agents: Record<string, AgentCard>
   diagrams: Diagram[]
   layout: Record<string, Layout>
-  diagram: string
+  /**
+   * The board the camera is on (B.5/B.11): it keys `canvas.layout`, `plan.relayout` and the
+   * `layout.update` guard, and the segmented switcher both sets it and follows it.
+   */
+  activeBoard: string
   hasSnapshot: boolean
   prompts: NeedsInputPrompt[]
   dispatches: DispatchRequest[]
@@ -48,7 +53,7 @@ export function initialState(): StoreState {
     agents: {},
     diagrams: [],
     layout: {},
-    diagram: 'hld',
+    activeBoard: DEFAULT_BOARD,
     hasSnapshot: false,
     prompts: [],
     dispatches: [],
@@ -62,6 +67,14 @@ export function initialState(): StoreState {
     lastReject: null,
     lastError: null,
   }
+}
+
+/** the board a fresh snapshot lands on: `hld` when present, else the first board diagram */
+function initialBoard(snap: Parameters<typeof primaryDiagram>[0]): string {
+  const name = primaryDiagram(snap)
+  if (isBoardName(name)) return name
+  for (const d of snap?.diagrams ?? []) if (isBoardName(d.name)) return d.name
+  return DEFAULT_BOARD
 }
 
 function pushTicker(ticker: TickerEntry[], entry: TickerEntry): TickerEntry[] {
@@ -96,7 +109,7 @@ export function reduce(state: StoreState, msg: ServerMessage): StoreState {
         agents,
         diagrams: snap.diagrams,
         layout: snap.layout ?? {},
-        diagram: primaryDiagram(snap),
+        activeBoard: initialBoard(snap),
         hasSnapshot: true,
         ticker: pushTicker(state.ticker, { seq: msg.seq, ts: msg.ts, kind: 'snapshot', text: `snapshot rev ${snap.rev} (${snap.nodes.length} nodes, ${snap.agents.length} agents)` }),
       }
@@ -197,6 +210,7 @@ export interface Store {
   dispatch(msg: ServerMessage): void
   set(patch: Partial<StoreState> | ((s: StoreState) => Partial<StoreState>)): void
   selectAgent(id: string | null): void
+  setActiveBoard(board: string): void
   setSocketStatus(status: SocketStatus): void
   removePrompt(promptId: string): void
   removeDispatch(requestId: string): void
@@ -228,6 +242,9 @@ export function createStore(init: StoreState = initialState()): Store {
     },
     selectAgent(id) {
       store.set({ selectedAgentId: id })
+    },
+    setActiveBoard(board) {
+      if (state.activeBoard !== board) store.set({ activeBoard: board })
     },
     setSocketStatus(status) {
       if (state.socket !== status) store.set({ socket: status })

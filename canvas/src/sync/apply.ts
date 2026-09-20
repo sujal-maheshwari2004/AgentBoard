@@ -1,5 +1,9 @@
 // Server truth → tldraw store. Every write is tagged remote (so the user-edit listener stays
 // quiet) and history-ignored (no undo pollution). Every function is idempotent.
+//
+// B.5: the single plan frame is gone. Nodes live in one of three board frames (HLD / LLD / ER)
+// on the one page, routed by `node.type`; everything that used to be a singleton now takes a
+// `frameId`.
 import {
   react,
   toRichText,
@@ -11,6 +15,7 @@ import {
   type TLDefaultFillStyle,
   type TLFrameShape,
   type TLGeoShape,
+  type TLParentId,
   type TLShape,
   type TLShapeId,
   type TLShapePartial,
@@ -19,12 +24,25 @@ import { AGENT_CARD_H, AGENT_CARD_W, type AgentCardShape } from '../shapes/Agent
 import { PLAN_NODE_H, PLAN_NODE_W, type PlanNodeShape } from '../shapes/PlanNodeUtil'
 import { borderAlpha, zoomAtom } from './zoom'
 import {
-  PLAN_FRAME_NAME,
-  PLAN_FRAME_TITLE,
+  BOARDS,
+  COLLAPSED_BOARD_H,
+  boardAtPoint,
+  boardFrameId,
+  boardLayoutKey,
+  boardOf,
+  boardOfFrameId,
+  boardOfShape,
+  boardSpecsFor,
+  edgeScope,
+  ensureBoards,
+  notifyBoardReparent,
+  presentBoards,
+  type BoardName,
+} from './boards'
+import {
   agentShapeId,
   bindingId,
   edgeShapeId,
-  frameShapeId,
   nodeShapeId,
   parseEdgeKey,
   shapeMeta,
@@ -32,10 +50,9 @@ import {
 } from '../shapes/ids'
 import { FRAME_PAD, NODE_H, NODE_W, boundsOf, positionsForMissing, relayoutUnpinned, type ExistingPosition, type LayoutEdgeInput, type LayoutNodeInput } from '../layout/dagre'
 import type { AgentCard, Layout, LayoutFrame, NodeStatus, PlanEdge, PlanNode, PlanSnapshot } from '../state/types'
-import { edgeKey, nodeReady, primaryDiagram } from '../state/types'
+import { edgeKey, nodeReady } from '../state/types'
 
-export const DEFAULT_FRAME: LayoutFrame = { x: 0, y: 0, w: 1200, h: 800, collapsed: false }
-export const COLLAPSED_H = 48
+export const COLLAPSED_H = COLLAPSED_BOARD_H
 export const AGENT_GAP = 60
 /** the plan-node label hangs below the box (B.3); reserve room for it when growing the frame */
 export const PLAN_NODE_LABEL_H = 40
@@ -103,39 +120,38 @@ export function findAgentShape(editor: Editor, id: string): AgentCardShape | und
   return editor.getShape<AgentCardShape>(agentShapeId(id))
 }
 
-export function getFrame(editor: Editor): TLFrameShape | undefined {
-  return editor.getShape<TLFrameShape>(frameShapeId(PLAN_FRAME_NAME))
+export function getFrame(editor: Editor, frameId: TLShapeId): TLFrameShape | undefined {
+  return editor.getShape<TLFrameShape>(frameId)
 }
 
-// ---------- frame ----------
+// ---------- boards ----------
 
-export function ensureFrame(editor: Editor, layoutFrame?: LayoutFrame): TLFrameShape {
-  const id = frameShapeId(PLAN_FRAME_NAME)
-  const existing = editor.getShape<TLFrameShape>(id)
-  if (existing) return existing
-  const f = { ...DEFAULT_FRAME, ...(layoutFrame ?? {}) }
-  const collapsed = !!f.collapsed
-  remote(editor, () => {
-    editor.createShape<TLFrameShape>({
-      id,
-      type: 'frame',
-      x: f.x,
-      y: f.y,
-      props: { w: f.w, h: collapsed ? COLLAPSED_H : f.h, name: PLAN_FRAME_TITLE, color: 'black' },
-      meta: shapeMeta('plan-frame', PLAN_FRAME_NAME, { collapsed, expandedH: f.h }),
-    })
-  })
-  return editor.getShape<TLFrameShape>(id)!
+/** create the board frames a snapshot calls for (ER only when it has an `er` diagram) */
+export function ensureBoardFrames(editor: Editor, diagramNames: Iterable<string> = [], layouts?: Record<string, Layout>): BoardName[] {
+  const frames: Record<string, LayoutFrame | undefined> = {}
+  for (const b of BOARDS) frames[boardLayoutKey(b.name)] = layouts?.[b.name]?.frames?.[boardLayoutKey(b.name)]
+  ensureBoards(editor, boardSpecsFor(diagramNames), frames, (fn) => remote(editor, fn))
+  return presentBoards(editor)
 }
 
-function frameOrigin(editor: Editor): { x: number; y: number } {
-  const f = getFrame(editor)
-  return f ? { x: f.x, y: f.y } : { x: DEFAULT_FRAME.x, y: DEFAULT_FRAME.y }
+/** the board a node belongs on, creating the default frames when the page is still empty */
+export function boardForNode(editor: Editor, node: PlanNode): { board: BoardName; frameId: TLShapeId } {
+  let present = presentBoards(editor)
+  if (present.length === 0) present = ensureBoardFrames(editor)
+  const board = boardOf(node, present)
+  return { board, frameId: boardFrameId(board) }
+}
+
+export function frameOrigin(editor: Editor, frameId: TLShapeId): { x: number; y: number } {
+  const f = getFrame(editor, frameId)
+  if (f) return { x: f.x, y: f.y }
+  const spec = BOARDS.find((b) => boardFrameId(b.name) === frameId)
+  return spec ? { x: spec.x, y: spec.y } : { x: 0, y: 0 }
 }
 
 /** grow (never shrink) the frame so every child fits, unless collapsed */
-export function fitFrame(editor: Editor): void {
-  const frame = getFrame(editor)
+export function fitFrame(editor: Editor, frameId: TLShapeId): void {
+  const frame = getFrame(editor, frameId)
   if (!frame || frame.meta.collapsed) return
   let w = frame.props.w
   let h = frame.props.h
@@ -154,6 +170,10 @@ export function fitFrame(editor: Editor): void {
   }
 }
 
+export function fitAllFrames(editor: Editor): void {
+  for (const board of presentBoards(editor)) fitFrame(editor, boardFrameId(board))
+}
+
 // ---------- nodes ----------
 
 export interface NodeContext {
@@ -164,9 +184,42 @@ export function nodeContext(nodes: Iterable<PlanNode>): NodeContext {
   return { byId: new Map(Array.from(nodes, (n) => [n.id, n])) }
 }
 
+/** keep a re-parented node inside its new board */
+function clampIntoFrame(editor: Editor, frameId: TLShapeId, x: number, y: number, w: number, h: number): { x: number; y: number } {
+  const frame = getFrame(editor, frameId)
+  if (!frame) return { x, y }
+  const maxX = Math.max(FRAME_PAD, frame.props.w - w - FRAME_PAD)
+  const maxY = Math.max(FRAME_PAD, frame.props.h - h - PLAN_NODE_LABEL_H - FRAME_PAD)
+  return { x: Math.min(Math.max(x, FRAME_PAD), maxX), y: Math.min(Math.max(y, FRAME_PAD), maxY) }
+}
+
+/**
+ * The node's `type` changed, so it now belongs on another board: move the shape into that frame
+ * (tldraw's `reparentShapes` converts the point through `getShapePageTransform`), clamp it inside
+ * and hand the layout entry to the new board's sidecar.
+ */
+function reparentNode(editor: Editor, shape: NodeShape, board: BoardName, frameId: TLShapeId, planId: string): void {
+  remote(editor, () => {
+    editor.reparentShapes([shape.id], frameId)
+    const moved = editor.getShape(shape.id) as NodeShape | undefined
+    if (!moved) return
+    const p = clampIntoFrame(editor, frameId, moved.x, moved.y, moved.props.w, moved.props.h)
+    if (p.x !== moved.x || p.y !== moved.y) {
+      editor.updateShape({ id: moved.id, type: moved.type, x: p.x, y: p.y } as TLShapePartial)
+    }
+  })
+  const now = editor.getShape(shape.id) as NodeShape | undefined
+  if (!now) return
+  const origin = frameOrigin(editor, frameId)
+  notifyBoardReparent(board, {
+    nodes: { [planId]: { x: origin.x + now.x, y: origin.y + now.y, w: now.props.w, h: now.props.h, parent: boardLayoutKey(board), pinned: true } },
+  })
+}
+
 /** `pos` is frame-local (top-left). Only used on create; existing shapes never move here. */
 export function upsertNode(editor: Editor, node: PlanNode, ctx: NodeContext, pos?: { x: number; y: number; w?: number; h?: number }): void {
-  const frame = ensureFrame(editor)
+  const { board, frameId } = boardForNode(editor, node)
+  const frame = getFrame(editor, frameId)
   const ready = nodeReady(node, ctx.byId)
   const dispatched = node.owner != null
   const existing = findNodeShape(editor, node.id)
@@ -201,13 +254,21 @@ export function upsertNode(editor: Editor, node: PlanNode, ctx: NodeContext, pos
     editor.createShape<PlanNodeShape>({
       id: nodeShapeId(node.id),
       type: 'plan-node',
-      parentId: frame.id,
+      parentId: frameId,
       x: p.x,
       y: p.y,
       props: { ...props, w: p.w ?? PLAN_NODE_W, h: p.h ?? PLAN_NODE_H },
-      meta: shapeMeta('plan-node', node.id, { status: node.status, hidden: !!frame.meta.collapsed }),
+      meta: shapeMeta('plan-node', node.id, { status: node.status, board, hidden: !!frame?.meta.collapsed }),
     })
   })
+  // the type changed under us: the node moves to its new board (and its sidecar entry with it)
+  if (existing && boardOfFrameId(String(existing.parentId)) && String(existing.parentId) !== String(frameId)) {
+    reparentNode(editor, existing, board, frameId, node.id)
+    remote(editor, () => {
+      const s = editor.getShape(existing.id)
+      if (s) editor.updateShape({ id: s.id, type: s.type, meta: { ...s.meta, board } } as TLShapePartial)
+    })
+  }
 }
 
 export function deleteNode(editor: Editor, id: string): void {
@@ -224,10 +285,23 @@ export function deleteNode(editor: Editor, id: string): void {
 
 // ---------- edges ----------
 
-function centerOf(shape: TLGeoShape | TLShape): { x: number; y: number } {
+/** centre of a shape expressed in `parentId`'s space (page space when the parent is the page) */
+function centerIn(editor: Editor, shape: TLShape, parentId: TLParentId): { x: number; y: number } {
+  const b = editor.getShapePageBounds(shape.id)
   const w = 'w' in shape.props ? (shape.props as { w: number }).w : 0
   const h = 'h' in shape.props ? (shape.props as { h: number }).h : 0
-  return { x: shape.x + w / 2, y: shape.y + h / 2 }
+  const center = b ? { x: b.x + b.w / 2, y: b.y + b.h / 2 } : { x: shape.x + w / 2, y: shape.y + h / 2 }
+  if (boardOfFrameId(String(parentId))) {
+    const o = frameOrigin(editor, parentId as TLShapeId)
+    return { x: center.x - o.x, y: center.y - o.y }
+  }
+  return center
+}
+
+/** B.4: endpoints in different frames are parented to the page and drawn as secondary */
+function edgeParent(editor: Editor, from: TLShape, to: TLShape): { parentId: TLParentId; cross: boolean } {
+  const cross = edgeScope(boardOfShape(from), boardOfShape(to)) === 'cross'
+  return { parentId: cross ? editor.getCurrentPageId() : from.parentId, cross }
 }
 
 function ensureBindings(editor: Editor, arrowId: TLShapeId, src: string, dst: string, fromId: TLShapeId, toId: TLShapeId): void {
@@ -263,49 +337,69 @@ function statusOf(shape: NodeShape | undefined): string {
   return String(shape?.meta?.status ?? 'todo')
 }
 
-/** re-stamp every edge whose endpoints' statuses moved (cheap: only changed metas are written) */
+/**
+ * Re-stamp every edge whose endpoints' statuses or boards moved (cheap: only changed metas are
+ * written). Must run after any batch of node upserts — including a re-parent, which can turn a
+ * within-board edge into a cross-board one.
+ */
 export function refreshEdgeStates(editor: Editor): void {
   const patches: TLShapePartial[] = []
+  const reparents: Array<[TLShapeId, TLParentId]> = []
   for (const s of editor.getCurrentPageShapes()) {
     if (kindOf(s) !== 'edge') continue
     const pair = parseEdgeKey(String(s.meta.planId))
     if (!pair) continue
-    const srcStatus = statusOf(findNodeShape(editor, pair.src))
-    const dstStatus = statusOf(findNodeShape(editor, pair.dst))
-    if (s.meta.srcStatus === srcStatus && s.meta.dstStatus === dstStatus) continue
-    patches.push({ id: s.id, type: s.type, meta: { ...s.meta, srcStatus, dstStatus } } as TLShapePartial)
+    const from = findNodeShape(editor, pair.src)
+    const to = findNodeShape(editor, pair.dst)
+    const srcStatus = statusOf(from)
+    const dstStatus = statusOf(to)
+    let cross = !!s.meta.cross
+    if (from && to) {
+      const p = edgeParent(editor, from, to)
+      cross = p.cross
+      if (String(s.parentId) !== String(p.parentId)) reparents.push([s.id, p.parentId])
+    }
+    if (s.meta.srcStatus === srcStatus && s.meta.dstStatus === dstStatus && !!s.meta.cross === cross) continue
+    patches.push({ id: s.id, type: s.type, meta: { ...s.meta, srcStatus, dstStatus, cross } } as TLShapePartial)
   }
-  if (patches.length) remote(editor, () => editor.updateShapes(patches))
+  if (patches.length || reparents.length) {
+    remote(editor, () => {
+      for (const [id, parentId] of reparents) editor.reparentShapes([id], parentId)
+      if (patches.length) editor.updateShapes(patches)
+    })
+  }
 }
 
 export function upsertEdge(editor: Editor, edge: PlanEdge): void {
   const from = findNodeShape(editor, edge.src)
   const to = findNodeShape(editor, edge.dst)
   if (!from || !to) return
-  const frame = ensureFrame(editor)
   const existing = findEdgeShape(editor, edge.src, edge.dst)
+  const { parentId, cross } = edgeParent(editor, from, to)
   const key = edgeKey(edge.src, edge.dst)
   const label = toRichText(edge.label ?? '')
   const srcStatus = statusOf(from)
   const dstStatus = statusOf(to)
+  const parentFrame = cross ? undefined : getFrame(editor, parentId as TLShapeId)
   remote(editor, () => {
     let arrowId: TLShapeId
     if (existing) {
       arrowId = existing.id
+      if (String(existing.parentId) !== String(parentId)) editor.reparentShapes([arrowId], parentId)
       editor.updateShape<TLArrowShape>({
         id: arrowId,
         type: 'arrow',
         props: { richText: label },
-        meta: { ...existing.meta, kind: 'edge', planId: key, diagram: edge.diagram, srcStatus, dstStatus },
+        meta: { ...existing.meta, kind: 'edge', planId: key, diagram: edge.diagram, srcStatus, dstStatus, cross },
       })
     } else {
       arrowId = edgeShapeId(edge.src, edge.dst)
-      const a = centerOf(from)
-      const b = centerOf(to)
+      const a = centerIn(editor, from, parentId)
+      const b = centerIn(editor, to, parentId)
       editor.createShape<TLArrowShape>({
         id: arrowId,
         type: 'arrow',
-        parentId: from.parentId === frame.id ? frame.id : editor.getCurrentPageId(),
+        parentId,
         x: a.x,
         y: a.y,
         props: {
@@ -319,7 +413,7 @@ export function upsertEdge(editor: Editor, edge: PlanEdge): void {
           font: 'sans',
           richText: label,
         },
-        meta: shapeMeta('edge', key, { diagram: edge.diagram, hidden: !!frame.meta.collapsed, srcStatus, dstStatus }),
+        meta: shapeMeta('edge', key, { diagram: edge.diagram, hidden: !!parentFrame?.meta.collapsed, srcStatus, dstStatus, cross }),
       })
     }
     ensureBindings(editor, arrowId, edge.src, edge.dst, from.id, to.id)
@@ -352,12 +446,13 @@ export function upsertAgent(editor: Editor, agent: AgentCard, ctx: NodeContext, 
     ready,
     nodeId: agent.assigned_node ?? '',
   }
+  const ownerFrameId = node ? boardForNode(editor, node).frameId : boardFrameId(presentBoards(editor)[0] ?? 'hld')
   remote(editor, () => {
     if (existing) {
       editor.updateShape<AgentCardShape>({ id: existing.id, type: 'agent-card', props })
       return
     }
-    const p: { x: number; y: number; w?: number; h?: number } = pos ?? nextAgentSlot(editor)
+    const p: { x: number; y: number; w?: number; h?: number } = pos ?? nextAgentSlot(editor, ownerFrameId)
     editor.createShape<AgentCardShape>({
       id: agentShapeId(agent.id),
       type: 'agent-card',
@@ -369,13 +464,17 @@ export function upsertAgent(editor: Editor, agent: AgentCard, ctx: NodeContext, 
   })
 }
 
-function nextAgentSlot(editor: Editor): { x: number; y: number } {
-  const frame = getFrame(editor)
-  const fx = frame ? frame.x + frame.props.w + AGENT_GAP : DEFAULT_FRAME.w + AGENT_GAP
-  const fy = frame ? frame.y : 0
+/** cards sit in a row under their owner board, so they never land on the next board */
+export function nextAgentSlot(editor: Editor, ownerFrameId: TLShapeId): { x: number; y: number } {
+  const frame = getFrame(editor, ownerFrameId)
+  const origin = frameOrigin(editor, ownerFrameId)
+  const y = origin.y + (frame ? frame.props.h : 0) + AGENT_GAP
   let count = 0
-  for (const s of editor.getCurrentPageShapes()) if (kindOf(s) === 'agent-card') count++
-  return { x: fx, y: fy + count * (AGENT_CARD_H + 20) }
+  for (const s of editor.getCurrentPageShapes()) {
+    if (kindOf(s) !== 'agent-card') continue
+    if (Math.abs(s.y - y) < 1) count++
+  }
+  return { x: origin.x + count * (AGENT_CARD_W + 20), y }
 }
 
 export function deleteAgent(editor: Editor, id: string): void {
@@ -392,9 +491,27 @@ function layoutInputs(nodes: PlanNode[], edges: PlanEdge[]): { ns: LayoutNodeInp
   }
 }
 
+/** group the plan's nodes by the board they are homed on */
+export function nodesByBoard(nodes: PlanNode[], present: Iterable<string>): Map<BoardName, PlanNode[]> {
+  const out = new Map<BoardName, PlanNode[]>()
+  const list = Array.from(present)
+  for (const n of nodes) {
+    const b = boardOf(n, list)
+    const arr = out.get(b)
+    if (arr) arr.push(n)
+    else out.set(b, [n])
+  }
+  return out
+}
+
+/** edges with both endpoints on the same board — the only ones dagre should rank */
+function edgesWithin(edges: PlanEdge[], ids: Set<string>): PlanEdge[] {
+  return edges.filter((e) => ids.has(e.src) && ids.has(e.dst))
+}
+
 /** frame-local positions currently on canvas or in the layout sidecar (page → local) */
-function knownPositions(editor: Editor, nodes: PlanNode[], layout: Layout | undefined): Record<string, ExistingPosition> {
-  const origin = frameOrigin(editor)
+function knownPositions(editor: Editor, frameId: TLShapeId, nodes: PlanNode[], layout: Layout | undefined): Record<string, ExistingPosition> {
+  const origin = frameOrigin(editor, frameId)
   const out: Record<string, ExistingPosition> = {}
   for (const n of nodes) {
     const shape = findNodeShape(editor, n.id)
@@ -410,27 +527,39 @@ function knownPositions(editor: Editor, nodes: PlanNode[], layout: Layout | unde
   return out
 }
 
-/** dagre only for nodes with no known position (never relayouts on push) */
-export function placeNodes(editor: Editor, nodes: PlanNode[], edges: PlanEdge[], layout: Layout | undefined, direction?: string): Record<string, { x: number; y: number }> {
-  const { ns, es } = layoutInputs(nodes, edges)
-  return positionsForMissing(ns, es, knownPositions(editor, nodes, layout), direction ?? layout?.direction)
+/** dagre only for nodes with no known position (never relayouts on push), one board at a time */
+export function placeNodes(editor: Editor, frameId: TLShapeId, nodes: PlanNode[], edges: PlanEdge[], layout: Layout | undefined, direction?: string): Record<string, { x: number; y: number }> {
+  const ids = new Set(nodes.map((n) => n.id))
+  const { ns, es } = layoutInputs(nodes, edgesWithin(edges, ids))
+  return positionsForMissing(ns, es, knownPositions(editor, frameId, nodes, layout), direction ?? layout?.direction)
 }
 
 // ---------- snapshot ----------
 
-export function applySnapshot(editor: Editor, snap: PlanSnapshot): void {
-  const diagram = primaryDiagram(snap)
-  const layout = snap.layout?.[diagram]
-  const direction = snap.diagrams.find((d) => d.name === diagram)?.direction ?? layout?.direction
-  const ctx = nodeContext(snap.nodes)
-  const frame = ensureFrame(editor, layout?.frames?.[PLAN_FRAME_NAME])
-
-  // nodes
-  const positions = placeNodes(editor, snap.nodes, snap.edges, layout, direction)
-  for (const n of snap.nodes) {
-    const l = layout?.nodes?.[n.id]
-    upsertNode(editor, n, ctx, { ...positions[n.id], w: l?.w, h: l?.h })
+function agentLayout(layouts: Record<string, Layout> | undefined, id: string) {
+  for (const l of Object.values(layouts ?? {})) {
+    const a = l.agents?.[id]
+    if (a) return a
   }
+  return undefined
+}
+
+export function applySnapshot(editor: Editor, snap: PlanSnapshot): void {
+  const present = ensureBoardFrames(editor, snap.diagrams.map((d) => d.name), snap.layout)
+  const ctx = nodeContext(snap.nodes)
+
+  // nodes, board by board (each board's dagre run is independent)
+  for (const [board, list] of nodesByBoard(snap.nodes, present)) {
+    const frameId = boardFrameId(board)
+    const layout = snap.layout?.[board]
+    const direction = snap.diagrams.find((d) => d.name === board)?.direction ?? layout?.direction
+    const positions = placeNodes(editor, frameId, list, snap.edges, layout, direction)
+    for (const n of list) {
+      const l = layout?.nodes?.[n.id]
+      upsertNode(editor, n, ctx, { ...positions[n.id], w: l?.w, h: l?.h })
+    }
+  }
+
   const nodeIds = new Set(snap.nodes.map((n) => n.id))
   const edgeKeys = new Set(snap.edges.map((e) => edgeKey(e.src, e.dst)))
   const agentIds = new Set(snap.agents.map((a) => a.id))
@@ -451,24 +580,30 @@ export function applySnapshot(editor: Editor, snap: PlanSnapshot): void {
 
   // agents
   snap.agents.forEach((a) => {
-    const l = layout?.agents?.[a.id]
+    const l = agentLayout(snap.layout, a.id)
     upsertAgent(editor, a, ctx, l ? { x: l.x, y: l.y, w: l.w, h: l.h } : undefined)
   })
 
-  fitFrame(editor)
-  if (frame.meta.collapsed) setCollapsedVisibility(editor, true)
+  for (const board of present) {
+    const frameId = boardFrameId(board)
+    fitFrame(editor, frameId)
+    if (getFrame(editor, frameId)?.meta.collapsed) setCollapsedVisibility(editor, frameId, true)
+  }
 }
 
-/** used by wiring for a single node push: place it if new, restyle if known */
-export function upsertNodeFromState(editor: Editor, node: PlanNode, all: PlanNode[], edges: PlanEdge[], layout: Layout | undefined): void {
+/** used by wiring for a single node push: place it if new, restyle (and re-home) if known */
+export function upsertNodeFromState(editor: Editor, node: PlanNode, all: PlanNode[], edges: PlanEdge[], layouts: Record<string, Layout> | undefined): void {
   const ctx = nodeContext(all)
   const existing = findNodeShape(editor, node.id)
   if (existing) {
     upsertNode(editor, node, ctx)
   } else {
-    const positions = placeNodes(editor, all, edges, layout)
+    const { board, frameId } = boardForNode(editor, node)
+    const layout = layouts?.[board]
+    const mine = all.filter((n) => boardOf(n, presentBoards(editor)) === board)
+    const positions = placeNodes(editor, frameId, mine, edges, layout)
     upsertNode(editor, node, ctx, positions[node.id])
-    fitFrame(editor)
+    fitFrame(editor, frameId)
   }
   // dependents' readiness may have changed
   for (const other of all) {
@@ -490,12 +625,16 @@ function near(a: number, b: number): boolean {
 }
 
 /**
- * Apply a layout sidecar (page coords). Nodes with a position are moved there; nodes whose
- * position was cleared (Re-layout) get dagre slots, pinned nodes stay.
+ * Apply one board's layout sidecar (page coords). Nodes with a position are moved there; nodes
+ * whose position was cleared (Re-layout) get dagre slots, pinned nodes stay.
  */
-export function applyLayout(editor: Editor, layout: Layout, nodes: PlanNode[], edges: PlanEdge[]): void {
-  const frame = ensureFrame(editor, layout.frames?.[PLAN_FRAME_NAME])
-  const lf = layout.frames?.[PLAN_FRAME_NAME]
+export function applyLayout(editor: Editor, board: string, layout: Layout, nodes: PlanNode[], edges: PlanEdge[]): void {
+  const frameId = boardFrameId(board)
+  if (!getFrame(editor, frameId)) ensureBoardFrames(editor, [board])
+  const frame = getFrame(editor, frameId)
+  if (!frame) return
+  const key = boardLayoutKey(board)
+  const lf = layout.frames?.[key]
   if (lf) {
     const collapsed = !!lf.collapsed
     remote(editor, () => {
@@ -512,18 +651,20 @@ export function applyLayout(editor: Editor, layout: Layout, nodes: PlanNode[], e
         meta: { ...frame.meta, collapsed, expandedH },
       })
     })
-    if (collapsed !== !!frame.meta.collapsed) setCollapsedVisibility(editor, collapsed)
+    if (collapsed !== !!frame.meta.collapsed) setCollapsedVisibility(editor, frameId, collapsed)
   }
-  const origin = frameOrigin(editor)
-  const { ns, es } = layoutInputs(nodes, edges)
+  const mine = nodes.filter((n) => boardOf(n, presentBoards(editor)) === board)
+  const ids = new Set(mine.map((n) => n.id))
+  const origin = frameOrigin(editor, frameId)
+  const { ns, es } = layoutInputs(mine, edgesWithin(edges, ids))
   const existing: Record<string, ExistingPosition> = {}
-  for (const n of nodes) {
+  for (const n of mine) {
     const l = layout.nodes?.[n.id]
     if (l && typeof l.x === 'number' && typeof l.y === 'number') existing[n.id] = { x: l.x - origin.x, y: l.y - origin.y, pinned: true }
   }
   const positions = relayoutUnpinned(ns, es, existing, layout.direction)
   remote(editor, () => {
-    for (const n of nodes) {
+    for (const n of mine) {
       const shape = findNodeShape(editor, n.id)
       const p = positions[n.id]
       if (!shape || !p) continue
@@ -541,27 +682,29 @@ export function applyLayout(editor: Editor, layout: Layout, nodes: PlanNode[], e
     }
   })
   const bounds = boundsOf(ns, positions)
-  const f = getFrame(editor)
+  const f = getFrame(editor, frameId)
   if (f && !f.meta.collapsed && (bounds.w > f.props.w || bounds.h > f.props.h)) {
     remote(editor, () => editor.updateShape<TLFrameShape>({ id: f.id, type: 'frame', props: { w: Math.max(f.props.w, bounds.w), h: Math.max(f.props.h, bounds.h) } }))
   }
-  fitFrame(editor)
+  fitFrame(editor, frameId)
 }
 
-/** Local re-layout of unpinned nodes (used right after sending plan.relayout). */
-export function relayoutLocal(editor: Editor, nodes: PlanNode[], edges: PlanEdge[], layout: Layout | undefined): void {
+/** Local re-layout of one board's unpinned nodes (used right after sending plan.relayout). */
+export function relayoutLocal(editor: Editor, board: string, nodes: PlanNode[], edges: PlanEdge[], layout: Layout | undefined): void {
   const pinned: NonNullable<Layout['nodes']> = {}
   for (const [id, l] of Object.entries(layout?.nodes ?? {})) if (l.pinned) pinned[id] = l
-  applyLayout(editor, { direction: layout?.direction, nodes: pinned }, nodes, edges)
+  applyLayout(editor, board, { direction: layout?.direction, nodes: pinned }, nodes, edges)
 }
 
 // ---------- zoom adaptation ----------
 
 /**
  * Write `--wb-zoom` (and the derived border alpha) on the editor container, at camera *stop* only
- * — n8n's zoom-adaptive borders and Dagster's degrade-to-dot both read them. Returns a disposer.
+ * — n8n's zoom-adaptive borders and Dagster's degrade-to-dot both read them. The same camera-stop
+ * reaction reports which board covers the viewport centre, so panning updates the board switcher
+ * (B.5). Returns a disposer.
  */
-export function installZoomTracking(editor: Editor): () => void {
+export function installZoomTracking(editor: Editor, onBoard?: (board: BoardName) => void): () => void {
   const el = editor.getContainer()
   const write = (zoom: number) => {
     el.style.setProperty('--wb-zoom', String(zoom))
@@ -570,16 +713,20 @@ export function installZoomTracking(editor: Editor): () => void {
   }
   return react('wb-zoom', () => {
     const zoom = editor.getZoomLevel()
-    // reading both keeps the reaction subscribed; we only publish once the camera settles
+    const viewport = editor.getViewportPageBounds()
+    // reading these keeps the reaction subscribed; we only publish once the camera settles
     if (editor.getCameraState() !== 'idle') return
     write(zoom)
+    if (!onBoard) return
+    const board = boardAtPoint(editor, { x: viewport.x + viewport.w / 2, y: viewport.y + viewport.h / 2 })
+    if (board) onBoard(board)
   })
 }
 
 // ---------- collapse ----------
 
-export function setCollapsedVisibility(editor: Editor, hidden: boolean): void {
-  const frame = getFrame(editor)
+export function setCollapsedVisibility(editor: Editor, frameId: TLShapeId, hidden: boolean): void {
+  const frame = getFrame(editor, frameId)
   if (!frame) return
   remote(editor, () => {
     for (const cid of editor.getSortedChildIdsForParent(frame.id)) {
@@ -591,11 +738,12 @@ export function setCollapsedVisibility(editor: Editor, hidden: boolean): void {
   })
 }
 
-export function setFrameCollapsed(editor: Editor, collapsed: boolean): LayoutFrame | null {
-  const frame = getFrame(editor)
+export function setFrameCollapsed(editor: Editor, frameId: TLShapeId, collapsed: boolean): LayoutFrame | null {
+  const frame = getFrame(editor, frameId)
   if (!frame) return null
   if (!!frame.meta.collapsed === collapsed) return null
-  const expandedH = collapsed ? frame.props.h : Number(frame.meta.expandedH ?? DEFAULT_FRAME.h)
+  const spec = BOARDS.find((b) => boardFrameId(b.name) === frameId)
+  const expandedH = collapsed ? frame.props.h : Number(frame.meta.expandedH ?? spec?.h ?? frame.props.h)
   remote(editor, () => {
     editor.updateShape<TLFrameShape>({
       id: frame.id,
@@ -604,7 +752,7 @@ export function setFrameCollapsed(editor: Editor, collapsed: boolean): LayoutFra
       meta: { ...frame.meta, collapsed, expandedH },
     })
   })
-  setCollapsedVisibility(editor, collapsed)
-  const f = getFrame(editor)!
+  setCollapsedVisibility(editor, frameId, collapsed)
+  const f = getFrame(editor, frameId)!
   return { x: f.x, y: f.y, w: f.props.w, h: expandedH, collapsed }
 }

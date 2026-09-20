@@ -28,6 +28,20 @@
       "edges": [],
       "mermaid": "flowchart TD\n    node-files[Files layer]\n    node-parser[Mermaid parser]\n    node-plan[Plan core]\n    node-canvas[tldraw canvas]\n    node-server[FastAPI server]\n    node-cli[CLI + skill]\n    node-files --> node-parser\n    node-files -->|frontmatter| node-plan\n    node-plan --> node-canvas\n    node-plan --> node-server\n    node-parser --> node-server\n    node-server --> node-cli\n",
       "path": ".whiteboard/plan/hld.md"
+    },
+    {
+      "name": "lld",
+      "direction": "TD",
+      "edges": [],
+      "mermaid": "flowchart TD\n    node-parser[Mermaid parser]\n",
+      "path": ".whiteboard/plan/lld.md"
+    },
+    {
+      "name": "er",
+      "direction": "TD",
+      "edges": [],
+      "mermaid": "flowchart TD\n    %% add nodes\n",
+      "path": ".whiteboard/plan/er.md"
     }
   ],
   "layout": {

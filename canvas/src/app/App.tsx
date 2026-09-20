@@ -3,6 +3,7 @@ import { Tldraw, type Editor, type TLComponents } from 'tldraw'
 import { AgentCardUtil } from '../shapes/AgentCardUtil'
 import { PlanNodeUtil } from '../shapes/PlanNodeUtil'
 import { WbShapeWrapper } from '../shapes/ShapeWrapper'
+import { store } from '../state/store'
 import { installZoomTracking } from '../sync/apply'
 import { FrameChrome, getShapeVisibility } from '../sync/frame'
 import { mountWiring } from '../sync/wire'
@@ -24,7 +25,8 @@ export function App() {
     // StrictMode mounts twice: each mount gets its own wiring and the returned cleanup tears it
     // down (socket closedRef, listeners), so a late-opening socket from the first pass never leaks.
     const wiring = mountWiring(ed)
-    const stopZoom = installZoomTracking(ed)
+    // camera stop also decides which board covers the viewport centre → `activeBoard` (B.5)
+    const stopZoom = installZoomTracking(ed, (board) => store.setActiveBoard(board))
     setEditor(ed)
     ed.setCurrentTool('select')
     return () => {

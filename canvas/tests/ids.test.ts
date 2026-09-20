@@ -18,6 +18,10 @@ describe('shape ids', () => {
     expect(agentShapeId('agent-parser')).toBe('shape:a_agent-parser')
     expect(frameShapeId('plan-board')).toBe('shape:f_plan-board')
     expect(frameShapeId()).toBe('shape:f_plan-board')
+    // B.5 board frames reuse the `f_` grammar: no new prefix, just new names
+    expect(frameShapeId('board-hld')).toBe('shape:f_board-hld')
+    expect(frameShapeId('board-lld')).toBe('shape:f_board-lld')
+    expect(frameShapeId('board-er')).toBe('shape:f_board-er')
     expect(edgeShapeId('node-a', 'node-b')).toBe('shape:e_node-a__node-b')
     expect(bindingId('node-a', 'node-b', 'start')).toBe('binding:b_node-a__node-b_start')
     expect(bindingId('node-a', 'node-b', 'end')).toBe('binding:b_node-a__node-b_end')
@@ -27,6 +31,8 @@ describe('shape ids', () => {
     expect(parseShapeId(nodeShapeId('node-parser'))).toEqual({ kind: 'plan-node', id: 'node-parser' })
     expect(parseShapeId(agentShapeId('agent-x'))).toEqual({ kind: 'agent-card', id: 'agent-x' })
     expect(parseShapeId(frameShapeId('plan-board'))).toEqual({ kind: 'plan-frame', id: 'plan-board' })
+    expect(parseShapeId(frameShapeId('board-hld'))).toEqual({ kind: 'plan-frame', id: 'board-hld' })
+    expect(parseShapeId(frameShapeId('board-er'))).toEqual({ kind: 'plan-frame', id: 'board-er' })
     expect(parseShapeId(edgeShapeId('node-a', 'node-b'))).toEqual({ kind: 'edge', id: 'node-a__node-b', src: 'node-a', dst: 'node-b' })
   })
 
@@ -43,6 +49,7 @@ describe('shape ids', () => {
       [nodeShapeId, 'plan-node', 'node-a-b-c'],
       [agentShapeId, 'agent-card', 'agent-1'],
       [frameShapeId, 'plan-frame', 'plan-board'],
+      [frameShapeId, 'plan-frame', 'board-lld'],
     ] as const) {
       expect(parseShapeId(make(id))).toMatchObject({ kind, id })
     }

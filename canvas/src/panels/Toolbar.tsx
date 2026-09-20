@@ -2,8 +2,10 @@ import { useValue, type Editor } from 'tldraw'
 import { store, useStore } from '../state/store'
 import type { NodeStatus } from '../state/types'
 import { kindOf } from '../sync/apply'
+import { boardFrameId } from '../sync/boards'
 import { toggleFrame } from '../sync/frame'
 import { getWiring } from '../sync/wire'
+import { BoardSwitcher } from './BoardSwitcher'
 import { PastePlanButton } from './PastePlan'
 
 const STATUSES: NodeStatus[] = ['todo', 'in_progress', 'blocked', 'done']
@@ -19,6 +21,7 @@ const TOOLS: Array<{ id: string; label: string; key: string }> = [
 
 export function Toolbar({ editor }: { editor: Editor | null }) {
   const socket = useStore((s) => s.socket)
+  const activeBoard = useStore((s) => s.activeBoard)
   const bridge = useStore((s) => s.bridge)
   const project = useStore((s) => s.project)
   const rev = useStore((s) => s.rev)
@@ -56,14 +59,21 @@ export function Toolbar({ editor }: { editor: Editor | null }) {
         </button>
       ))}
       <span className="sep" />
+      <BoardSwitcher editor={editor} />
+      <span className="sep" />
       <button className="wb-btn" disabled={!editor} onClick={() => getWiring()?.relayout()} title="Re-run dagre for unpinned nodes">
         Re-layout
       </button>
       <button className="wb-btn" disabled={!editor} onClick={() => editor?.zoomToFit({ animation: { duration: 200 } })}>
         Zoom to fit
       </button>
-      <button className="wb-btn" disabled={!editor} onClick={() => editor && toggleFrame(editor)} title="Collapse / expand the plan board">
-        Board
+      <button
+        className="wb-btn"
+        disabled={!editor}
+        onClick={() => editor && toggleFrame(editor, boardFrameId(activeBoard))}
+        title={`Collapse / expand the ${activeBoard.toUpperCase()} board`}
+      >
+        Collapse
       </button>
       <PastePlanButton />
       <span className="sep" />

@@ -1,11 +1,16 @@
 import { describe, expect, it } from 'vitest'
 import { toRichText, type TLArrowBinding, type TLArrowShape, type TLGeoShape, type TLRecord, type TLRichText, type TLShape, type TLShapeId } from 'tldraw'
-import { deriveOps, emptyPending, mergeDiff, mergeLayoutPatch, type CollectContext, type Pending } from '../src/sync/collect'
-import { bindingId, edgeShapeId, frameShapeId, nodeShapeId, shapeMeta } from '../src/shapes/ids'
+import { deriveOps, emptyPending, frameRefOf, mergeDiff, mergeLayoutPatch, type CollectContext, type Pending } from '../src/sync/collect'
+import { bindingId, edgeShapeId, nodeShapeId, shapeMeta } from '../src/shapes/ids'
+import { boardFrameId } from '../src/sync/boards'
 
 // ---- synthetic records ----
 
-const FRAME = frameShapeId('plan-board')
+// B.5: nodes live in board frames now; `board-hld` is the HLD board's sidecar key / planId
+const FRAME = boardFrameId('hld')
+const LLD_FRAME = boardFrameId('lld')
+/** an agent folder (B.S3) — a frame we must NOT promote drawn boxes inside (B.12) */
+const FOLDER = 'shape:g_agent-parser' as TLShape['parentId']
 const PAGE = 'page:page' as TLShape['parentId']
 
 function plaintext(rt: TLRichText): string {
@@ -78,7 +83,12 @@ interface World {
 
 function ctxFor(world: World, frame = { x: 100, y: 200 }): CollectContext {
   return {
-    frameId: FRAME,
+    frameKindOf: (s) => {
+      if (s.parentId === FRAME) return { kind: 'board', id: 'board-hld' }
+      if (s.parentId === LLD_FRAME) return { kind: 'board', id: 'board-lld' }
+      if (s.parentId === FOLDER) return { kind: 'agent-folder', id: 'agent-parser' }
+      return null
+    },
     diagram: 'hld',
     plaintext,
     getShape: (id) => world.shapes.get(id),
@@ -136,7 +146,21 @@ describe('deriveOps', () => {
     const d = deriveOps(ctxFor(world(s)), pendingOf({ added: [s] }))
     expect(d.ops).toEqual([{ op: 'node-created', id: 'node-auth-service', label: 'Auth service', shape: 'rect', diagram: 'hld' }])
     expect(d.stamps).toEqual([{ id: s.id, type: 'geo', meta: { kind: 'plan-node', planId: 'node-auth-service', provisional: true } }])
-    expect(d.layout?.nodes?.['node-auth-service']).toMatchObject({ x: 130, y: 240, w: 200, h: 80, parent: 'plan-board', pinned: true })
+    expect(d.layout?.nodes?.['node-auth-service']).toMatchObject({ x: 130, y: 240, w: 200, h: 80, parent: 'board-hld', pinned: true })
+  })
+
+  it('stamps the board it was drawn on, not the active board', () => {
+    const s = geo('shape:human2' as TLShapeId, { label: 'Token store', parentId: LLD_FRAME })
+    const d = deriveOps(ctxFor(world(s)), pendingOf({ added: [s] }))
+    expect(d.ops).toEqual([{ op: 'node-created', id: 'node-token-store', label: 'Token store', shape: 'rect', diagram: 'lld' }])
+    expect(d.layout?.nodes?.['node-token-store']).toMatchObject({ parent: 'board-lld', pinned: true })
+  })
+
+  it('yields no op for a box drawn outside any board frame (page or agent folder)', () => {
+    const loose = geo('shape:h4' as TLShapeId, { label: 'Note to self', parentId: PAGE })
+    expect(deriveOps(ctxFor(world(loose)), pendingOf({ added: [loose] }))).toMatchObject({ ops: [], stamps: [], layout: null })
+    const inFolder = geo('shape:h5' as TLShapeId, { label: 'Parser class', parentId: FOLDER })
+    expect(deriveOps(ctxFor(world(inFolder)), pendingOf({ added: [inFolder] }))).toMatchObject({ ops: [], stamps: [], layout: null })
   })
 
   it('waits for a label before creating a node, and ignores boxes outside the frame', () => {
@@ -212,7 +236,7 @@ describe('deriveOps', () => {
     const d = deriveOps(ctxFor(world(after)), pendingOf({ updated: [[before, after]] }))
     expect(d.ops).toEqual([])
     expect(d.layout).toEqual({
-      nodes: { 'node-a': { x: 150, y: 260, w: 220, h: 80, parent: 'plan-board', pinned: true } },
+      nodes: { 'node-a': { x: 150, y: 260, w: 220, h: 80, parent: 'board-hld', pinned: true } },
       agents: {},
       frames: {},
     })
@@ -221,14 +245,25 @@ describe('deriveOps', () => {
   it('records agent card moves and frame moves (with children re-paged)', () => {
     const cardBefore = { ...geo('shape:a_agent-x' as TLShapeId, { label: '', parentId: PAGE, x: 1300, y: 40, w: 240, h: 120 }), type: 'agent-card', meta: shapeMeta('agent-card', 'agent-x') } as unknown as TLShape
     const cardAfter = { ...cardBefore, x: 1400 } as TLShape
-    const frameBefore = { ...geo(FRAME, { label: '', parentId: PAGE, x: 0, y: 0, w: 1000, h: 700 }), type: 'frame', meta: shapeMeta('plan-frame', 'plan-board', { collapsed: false }) } as unknown as TLShape
+    const frameBefore = { ...geo(FRAME, { label: '', parentId: PAGE, x: 0, y: 0, w: 1000, h: 700 }), type: 'frame', meta: shapeMeta('plan-frame', 'board-hld', { collapsed: false }) } as unknown as TLShape
     const frameAfter = { ...frameBefore, x: 100, y: 200 } as TLShape
     const child = planNode('node-a', 'A', { x: 10, y: 20 })
     const d = deriveOps(ctxFor(world(cardAfter, frameAfter, child)), pendingOf({ updated: [[cardBefore, cardAfter], [frameBefore, frameAfter]] }))
     expect(d.ops).toEqual([])
     expect(d.layout?.agents).toEqual({ 'agent-x': { x: 1400, y: 40, w: 240, h: 120 } })
-    expect(d.layout?.frames).toEqual({ 'plan-board': { x: 100, y: 200, w: 1000, h: 700, collapsed: false } })
-    expect(d.layout?.nodes).toEqual({ 'node-a': { x: 110, y: 220, w: 200, h: 80, parent: 'plan-board', pinned: true } })
+    expect(d.layout?.frames).toEqual({ 'board-hld': { x: 100, y: 200, w: 1000, h: 700, collapsed: false } })
+    expect(d.layout?.nodes).toEqual({ 'node-a': { x: 110, y: 220, w: 200, h: 80, parent: 'board-hld', pinned: true } })
+  })
+})
+
+describe('frameRefOf', () => {
+  it('reads the frame kind off the parent shape meta', () => {
+    const board = { meta: shapeMeta('plan-frame', 'board-lld') } as unknown as TLShape
+    expect(frameRefOf(board)).toEqual({ kind: 'board', id: 'board-lld' })
+    const folder = { meta: { kind: 'agent-folder', planId: 'agent-parser' } } as unknown as TLShape
+    expect(frameRefOf(folder)).toEqual({ kind: 'agent-folder', id: 'agent-parser' })
+    expect(frameRefOf(undefined)).toBeNull()
+    expect(frameRefOf({ meta: {} } as unknown as TLShape)).toBeNull()
   })
 })
 
@@ -261,8 +296,8 @@ describe('mergeDiff', () => {
 
 describe('mergeLayoutPatch', () => {
   it('deep-merges the four sections', () => {
-    const m = mergeLayoutPatch({ nodes: { a: { x: 1, y: 1 } } }, { nodes: { b: { x: 2, y: 2 } }, frames: { 'plan-board': { x: 0, y: 0, w: 1, h: 1 } } })
+    const m = mergeLayoutPatch({ nodes: { a: { x: 1, y: 1 } } }, { nodes: { b: { x: 2, y: 2 } }, frames: { 'board-hld': { x: 0, y: 0, w: 1, h: 1 } } })
     expect(m.nodes).toEqual({ a: { x: 1, y: 1 }, b: { x: 2, y: 2 } })
-    expect(m.frames).toEqual({ 'plan-board': { x: 0, y: 0, w: 1, h: 1 } })
+    expect(m.frames).toEqual({ 'board-hld': { x: 0, y: 0, w: 1, h: 1 } })
   })
 })
