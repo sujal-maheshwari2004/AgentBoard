@@ -356,6 +356,35 @@ Use mcp__whiteboard__get_events(since_seq=56) for full payloads.
 ```
 Posted as one `{"type":"user","text": ...}` line after `{"type":"auth","token": ...}`.
 
+### Bullet prefix registry
+
+Every bullet the bridge can push starts with one of these literal prefixes. This list is the single
+source of truth: `skill/whiteboard/SKILL.md` ("Bullet → action") and `docs/RUNBOOK.md` §3 must cover
+every one of them, and every one must be emitted from a `push_root(...)` line under `whiteboard/`.
+`tests/test_protocol_conformance.py` parses exactly this list and enforces all three.
+
+- `plan pasted`
+- `chat (to: `
+- `edit: `
+- `status: `
+- `external edit`
+- `risky edit accepted`
+- `risky edit rejected`
+- `needs_input (prompt `
+- `needs_input reply (prompt `
+- `dispatch approved: `
+- `dispatch rejected: `
+- `done on `
+- `blocked`
+- `diagram approved: `
+- `diagram rejected: `
+- `agent plan edited: `
+- `agent diagram edited: `
+- `acknowledged plan edit (event `
+
+A prefix may be preceded on the line by the agent id (`agent-x done on node-x …`,
+`agent-x blocked on node-x: …`, `agent-x acknowledged plan edit (event N): …`).
+
 ## 10. CLI (T5)
 
 `whiteboard start --project-dir P [--force] [--no-open]` → prints `server.json` content; `stop`; `status --json`; `scaffold --project-dir P [--force]`; `register --project-dir P` (runs `claude mcp add`); hidden `_serve --project-dir P` (foreground; calls `whiteboard.server.app.run_foreground(root)`).
@@ -363,8 +392,49 @@ Posted as one `{"type":"user","text": ...}` line after `{"type":"auth","token": 
 
 ## 11. Skill (T5)
 
-`skill/whiteboard/SKILL.md` frontmatter: `name: whiteboard`, `description: Enter whiteboard mode — plan and execute this project visually with Claude on a local tldraw canvas backed by .whiteboard/ markdown. Use when the user says "enter whiteboard mode", "whiteboard", "open the canvas", or wants to plan with diagrams and spawn subagents per task.`, `allowed-tools: Bash(bash ~/.claude/skills/whiteboard/scripts/*) Read`.
-Body: run `bash ~/.claude/skills/whiteboard/scripts/enter.sh "$PWD"`; then the root protocol (see plan) incl. first-run `/mcp` note, message handling rules, dispatch flow, chat forwarding with SendMessage, liaison spawning, and "never message subagents about each other's work; everything goes through events".
-`enter.sh <project>`: ensure `uv sync --frozen` in `$AGENTBOARD_HOME` (default `~/AgentBoard`); `whiteboard scaffold`; `whiteboard start`; `curl -s -X POST $url/api/session -d '{"socket": "$CLAUDE_CODE_MESSAGING_SOCKET", "token": "$CLAUDE_CODE_MESSAGING_TOKEN"}'`; `whiteboard register` (idempotent `claude mcp add`); `open "$url"` unless `--no-open`; print a JSON summary `{url, mcp_url, first_registration: bool, scaffolded: bool}`.
-`session_hook.sh start|prompt`: reads `.whiteboard/server.json`; on `start`, re-targets the bridge via `/api/session` and prints `additionalContext` with status; on `prompt`, prints unread count from `GET /api/events?since=<last pushed seq>` (server exposes `bridge.last_pushed_seq` in `/api/health`).
-Scaffold also writes `<project>/.claude/agents/whiteboard-task.md`, `whiteboard-liaison.md`, merges hooks + `crossSessionInbound: accept` into `<project>/.claude/settings.local.json`, and appends gitignore lines.
+`skill/whiteboard/SKILL.md` frontmatter (byte-identical to v1): `name: whiteboard`, `description: Enter whiteboard mode — plan and execute this project visually with Claude on a local tldraw canvas backed by .whiteboard/ markdown. Use when the user says "enter whiteboard mode", "whiteboard", "open the canvas", or wants to plan with diagrams and spawn subagents per task.`, `allowed-tools: Bash(bash ~/.claude/skills/whiteboard/scripts/*) Read`.
+Body: run `bash ~/.claude/skills/whiteboard/scripts/enter.sh "$PWD"`; interpret the JSON below; then the root protocol — the "Bullet → action" table (one row per §9 registry prefix), plan intake via `propose_diagram` for `hld`/`lld`/`er`, the dispatch loop (`propose_dispatch` → approval → `Agent(subagent_type="whiteboard-task")` → `set_agent_ref` → `finalize_agent`) with the `general-purpose` fallback, plan-edit propagation, liaison spawning, and the hard rules (never `write_diagram`; `SendMessage` only for forwarded chat, prompt replies, plan-edit notices and diagram-edit notices; never edit `~/.claude/settings.json`).
+
+### `enter.sh <project> [--no-open]`
+
+Ensure `uv sync --frozen` in `$AGENTBOARD_HOME` (default `~/AgentBoard`); `whiteboard scaffold`; `whiteboard start --no-open`; POST `$url/api/session` with `{"socket": "$CLAUDE_CODE_MESSAGING_SOCKET", "token": "$CLAUDE_CODE_MESSAGING_TOKEN"}`; `whiteboard register` (idempotent `claude mcp add`); install the user-scope agent definitions; `open "$url"` unless `--no-open`. Prints exactly one JSON line:
+
+```
+{url, mcp_url, port, first_registration, scaffolded, project, session_project,
+ session_project_matches, inbound_ok, inbound_scope, inbound_sources, agents_installed,
+ fix_hint, warnings}
+```
+
+| key | meaning |
+|---|---|
+| `project` | resolved path of the whiteboarded project (the script's argument) |
+| `session_project` | resolved `CLAUDE_PROJECT_DIR`, falling back to `$PWD` — the project of the session that receives pushes |
+| `session_project_matches` | `session_project == project` |
+| `inbound_ok` | `crossSessionInbound == "accept"` in `~/.claude/settings.json` **or** in `<session_project>/.claude/settings{,.local}.json`. The whiteboarded project's value does **not** count when it is not the session project |
+| `inbound_scope` | `"user"`, `"session-project"` or `null` — where the accepting value was found |
+| `inbound_sources` | every settings file inspected → its `crossSessionInbound` value or `null`, including the whiteboarded project's (reported, not counted) |
+| `agents_installed` | the `install_agent_definitions` dict: `{ok, dir, "whiteboard-task": state, "whiteboard-liaison": state}` |
+| `fix_hint` | present only when `inbound_ok` is false: a one-line shell command that backs `~/.claude/settings.json` up to `settings.json.bak` and then sets the key. The skill prints it; neither the script nor Claude ever writes that file |
+| `warnings` | one string per problem: mismatched session project, missing inbound accept, unset `CLAUDE_CODE_MESSAGING_SOCKET`, failed agent install |
+
+### User-scope agent definitions (`whiteboard.agents_install`)
+
+`~/.claude/agents/whiteboard-task.md` and `whiteboard-liaison.md` are **copies** of `templates/agents/*.md`, never symlinks (a dangling symlink fails silently at dispatch time). Each copy ends with a provenance stamp `<!-- installed by AgentBoard from templates/agents/<name>.md; sha256=<12 hex of the template>. … -->`.
+
+- `source_text(name, templates_dir=None) -> str`, `render_agent_definition(name, templates_dir=None) -> str`.
+- `installed_state(dest, wanted) -> "missing" | "unchanged" | "stale" | "user-modified"` — no file → `missing`; stamped with the same hash → `unchanged`; stamped with a different hash → `stale`; no stamp → `user-modified`.
+- `install_agent_definitions(dest_dir, *, templates_dir=None, force=False) -> {ok, dir, "whiteboard-task": state, "whiteboard-liaison": state}` with per-file state `installed | refreshed | unchanged | user-modified | failed:<err>`; `ok` is true when every state is in `{installed, refreshed, unchanged}`. A `user-modified` file is left alone unless `force`.
+- `python -m whiteboard.agents_install [--dest DIR] [--force]` prints that dict as JSON.
+
+`make install-agents` runs it against `$(HOME)/.claude/agents`; `make install-skill` depends on it and symlinks the skill directory (the skill dir stays a symlink so a stale SKILL.md is visible immediately).
+
+### `session_hook.sh start|prompt`
+
+Reads `<cwd>/.whiteboard/server.json`; prints either nothing or one valid `hookSpecificOutput` JSON; always exits 0.
+
+- `start`: re-targets the bridge via `/api/session` and prints status, plus one sentence when `/api/health.pending_diagrams` is truthy.
+- `prompt`: one combined line carrying three reports — unread events (`latest_seq - bridge.last_pushed_seq`, with the `get_events(since_seq=…)` instruction), unread chat per thread (`GET /api/threads`, then `GET /api/threads/<name>?since=<last_pushed_seq>` for at most four hot threads → `Unread chat by thread: root=N, agent-x=M` plus the `chat_reply` instruction), and `N diagram proposal(s) still awaiting approval` from `/api/health.pending_diagrams` (int or list). Every request beyond `/api/health` is wrapped so a server without `/api/threads` still emits the plain unread-events line and exits 0.
+
+### Scaffold
+
+`whiteboard scaffold` writes `.whiteboard/` (`PLAN.md`, `COLLABORATION.md`, `plan/hld.md`, `plan/er.md`, `plan/nodes/`, `agents/`, `events.jsonl`), installs `<project>/.claude/agents/whiteboard-task.md` and `whiteboard-liaison.md` through `render_agent_definition`/`installed_state` (so a v1 project self-heals and a hand-edited file is reported `user-modified`, never clobbered), merges the hooks + `crossSessionInbound: accept` into `<project>/.claude/settings.local.json`, and appends the gitignore lines. Its result dict is `{created, skipped, agents, cross_session_inbound, settings_path}`.
