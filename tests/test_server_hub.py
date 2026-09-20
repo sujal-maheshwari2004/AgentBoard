@@ -103,8 +103,11 @@ def test_parse_every_client_type() -> None:
         "plan.paste": {"text": "flowchart TD"},
         "prompt.reply": {"prompt_id": "p1", "value": "yes"},
         "dispatch.reply": {"request_id": "r1", "approved": True},
+        "diagram.reply": {"request_id": "r1", "approved": True, "note": "ship it", "mermaid": None},
         "risky_edit.reply": {"request_id": "r1", "approved": False, "note": "no"},
         "plan.relayout": {"diagram": "er"},
+        "agent.plan.edit": {"agent_id": "agent-x", "plan_md": "# spec\n"},
+        "agent.diagram.edit": {"agent_id": "agent-x", "mermaid": "flowchart TD\n    A[A]\n"},
     }
     assert set(samples) == set(P.CLIENT_MESSAGE_TYPES)
     for mtype, payload in samples.items():

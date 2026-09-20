@@ -180,7 +180,7 @@ def test_node_status_button(client: TestClient, project: Path) -> None:
 
 
 # ------------------------------------------------------------------- chat
-def test_chat_logs_event_and_queues_bridge_line(client: TestClient) -> None:
+def test_chat_logs_event_projects_message_and_queues_bridge_line(client: TestClient) -> None:
     with client.websocket_connect("/ws") as ws:
         hello(ws)
         ws.send_json({"type": "chat.message", "payload": {"text": "can we merge?", "agentId": "agent-parser", "nodeId": "node-a"}, "seq": 2})
@@ -188,12 +188,28 @@ def test_chat_logs_event_and_queues_bridge_line(client: TestClient) -> None:
         assert [m["type"] for m in seen] == ["event.append"]
         p = ev["payload"]
         assert p["type"] == "chat" and p["agent_id"] == "user" and p["note"] == "can we merge?"
-        assert p["data"] == {"to": "agent-parser", "nodeId": "node-a"} and p["notified"] == ["agent-parser"]
-        assert ev["seq"] == p["seq"] == 1
-        ws.send_json({"type": "chat.message", "payload": {"text": "hello root"}, "seq": 3})
+        assert p["data"] == {"from": "user", "to": "agent-parser", "thread": "agent-parser",
+                             "reply_to": None, "nodeId": "node-a"}
+        assert p["notified"] == ["agent-parser"] and ev["seq"] == p["seq"] == 1
+        # exactly one chat.message rides along with the event (the Bus projection)
+        msg, seen = recv_until(ws, "chat.message")
+        assert [m["type"] for m in seen] == ["chat.message"]
+        assert msg["payload"] == {
+            "id": "chat-1", "thread": "agent-parser", "from": "user", "to": "agent-parser",
+            "text": "can we merge?", "ts": p["ts"], "seq": 1, "reply_to": None, "node_id": "node-a",
+        }
+        # an explicit thread wins, and reply_to is carried through
+        ws.send_json({"type": "chat.message", "payload": {"text": "hello root", "thread": "agent-parser", "reply_to": "chat-1"}, "seq": 3})
         ev2, _ = recv_until(ws, "event.append")
         assert ev2["payload"]["data"]["to"] == "root" and ev2["payload"]["node_id"] is None
-    assert _bridge_lines(client) == ['chat (to: agent-parser): "can we merge?"', 'chat (to: root): "hello root"']
+        assert ev2["payload"]["data"]["thread"] == "agent-parser"
+        msg2, _ = recv_until(ws, "chat.message")
+        assert msg2["payload"]["thread"] == "agent-parser" and msg2["payload"]["reply_to"] == "chat-1"
+        assert msg2["payload"]["id"] == "chat-2"
+    assert _bridge_lines(client) == [
+        'chat (to: agent-parser, thread agent-parser): "can we merge?"',
+        'chat (to: root, thread agent-parser): "hello root"',
+    ]
     assert [e["type"] for e in _events(client)] == ["chat", "chat"]
 
 
@@ -371,3 +387,186 @@ def test_dispatch_reply_is_idempotent(client: TestClient) -> None:
     decisions = [e for e in st.log.read_since(0, limit=500)
                  if e.data.get("request_id") == "dup-1" and e.type.startswith("dispatch_a")]
     assert len(decisions) == 1
+
+
+# ------------------------------------------------------------------- diagram.reply
+PROPOSED = "flowchart TD\n    node-a[A thing]\n    node-b[B thing]\n    node-c[C thing]\n    node-a --> node-b\n"
+EDITED = PROPOSED.replace("    node-a --> node-b\n", "    node-d[D thing]\n    node-a --> node-b\n")
+
+
+def _propose(client: TestClient, *, request_id: str = "d-1", name: str = "hld", mermaid: str = PROPOSED) -> str:
+    """Append the `diagram_proposed` event `propose_diagram` would, and rebuild pending."""
+    st = _state(client)
+    st.log.append(
+        agent_id="root", node_id=None, type="diagram_proposed", note=f"propose diagram {name}",
+        data={"request_id": request_id, "name": name, "mermaid": mermaid, "rationale": "because", "diff": {}},
+    )
+    st.ctx.restore_pending_diagrams()
+    return request_id
+
+
+def test_diagram_reply_approves_the_owners_edit_and_is_idempotent(client: TestClient, project: Path) -> None:
+    rid = _propose(client)
+    with client.websocket_connect("/ws") as ws:
+        hello(ws)
+        ws.send_json({"type": "diagram.reply", "payload": {"request_id": rid, "approved": True, "note": "ship it", "mermaid": EDITED}, "seq": 2})
+        ack, seen = recv_until(ws, "edit.ack")
+        assert {m["payload"]["node"]["id"] for m in seen if m["type"] == "plan.node.upsert"} >= {"node-d"}
+        assert ack["payload"]["forSeq"] == 2
+        ev, _ = recv_until(ws, "event.append")
+        assert ev["payload"]["type"] == "diagram_approved" and ev["payload"]["agent_id"] == "user"
+        assert ev["payload"]["data"] == {
+            "request_id": rid, "name": "hld", "note": "ship it",
+            "edited": True, "created": ["node-d"], "edges": 1,
+        }
+        # decided once: a re-delivered reply must not append a second decision
+        ws.send_json({"type": "diagram.reply", "payload": {"request_id": rid, "approved": False}, "seq": 3})
+        err, _ = recv_until(ws, "server.error")
+        assert err["payload"]["code"] == "already_resolved"
+    st = _state(client)
+    assert st.store.pending_diagrams == {}
+    assert st.store.get_node("node-d") is not None
+    assert "node-d[D thing]" in (project / ".whiteboard" / "plan" / "hld.md").read_text()
+    assert _bridge_lines(client) == [
+        f'diagram approved: hld (req {rid}; 4 nodes, 1 edges; created node-d) — "ship it"'
+    ]
+    assert [e["type"] for e in _events(client)] == ["diagram_proposed", "diagram_approved"]
+
+
+def test_diagram_reply_rejected_writes_nothing(client: TestClient, project: Path) -> None:
+    before = (project / ".whiteboard" / "plan" / "hld.md").read_text()
+    rid = _propose(client, request_id="d-2", mermaid=EDITED)
+    with client.websocket_connect("/ws") as ws:
+        hello(ws)
+        ws.send_json({"type": "diagram.reply", "payload": {"request_id": rid, "approved": False, "note": "not yet"}, "seq": 2})
+        ack, seen = recv_until(ws, "edit.ack")
+        assert not any(m["type"].startswith("plan.") for m in seen)
+        ev, _ = recv_until(ws, "event.append")
+        assert ev["payload"]["type"] == "diagram_rejected"
+        assert ev["payload"]["data"] == {"request_id": rid, "name": "hld", "note": "not yet"}
+        ws.send_json({"type": "diagram.reply", "payload": {"request_id": "nope", "approved": True}, "seq": 3})
+        err, _ = recv_until(ws, "server.error")
+        assert err["payload"]["code"] == "unknown_request"
+    st = _state(client)
+    assert st.store.pending_diagrams == {} and st.store.get_node("node-d") is None
+    assert (project / ".whiteboard" / "plan" / "hld.md").read_text() == before
+    assert _bridge_lines(client) == [f'diagram rejected: hld (req {rid}) — "not yet"']
+
+
+def test_bad_mermaid_keeps_the_proposal_pending(client: TestClient) -> None:
+    rid = _propose(client, request_id="d-3")
+    with client.websocket_connect("/ws") as ws:
+        hello(ws)
+        ws.send_json({"type": "diagram.reply", "payload": {"request_id": rid, "approved": True, "mermaid": "flowchart TD\n    node-a -->\n"}, "seq": 2})
+        err, seen = recv_until(ws, "server.error")
+        assert err["payload"]["code"] == "bad_diagram" and not any(m["type"].startswith("plan.") for m in seen)
+        assert rid in _state(client).store.pending_diagrams  # still open: fix it and re-reply
+        ws.send_json({"type": "diagram.reply", "payload": {"request_id": rid, "approved": True}, "seq": 3})
+        recv_until(ws, "edit.ack")
+        ev, _ = recv_until(ws, "event.append")
+        assert ev["payload"]["type"] == "diagram_approved" and ev["payload"]["data"]["edited"] is False
+    assert _state(client).store.pending_diagrams == {}
+    assert _bridge_lines(client) == [f"diagram approved: hld (req {rid}; 3 nodes, 1 edges)"]
+
+
+def test_hello_resends_pending_diagram_requests(client: TestClient) -> None:
+    rid = _propose(client, request_id="d-4", mermaid=EDITED)
+    with client.websocket_connect("/ws") as ws:
+        _snap, rest = hello(ws, last_seq=99)
+        req = next(m for m in rest if m["type"] == "diagram.request")
+        p = req["payload"]
+        assert p["request_id"] == rid and p["name"] == "hld" and p["mermaid"] == EDITED
+        assert p["rationale"] == "because"
+        # the diff is recomputed against the board as it is now
+        assert [n["id"] for n in p["nodes_added"]] == ["node-d"] and p["nodes_removed"] == []
+        assert [m["type"] for m in rest] == ["diagram.request", "bridge.status"]
+
+
+# ------------------------------------------------------------------- chat backfill
+def test_hello_replays_chat_threads(client: TestClient) -> None:
+    log = _state(client).log
+    log.append(agent_id="user", node_id=None, type="chat", note="hi root",
+               data={"from": "user", "to": "root", "thread": "root"})
+    log.append(agent_id="root", node_id=None, type="chat", note="hi back",
+               data={"from": "root", "to": "user", "thread": "root"})
+    log.append(agent_id="user", node_id="node-a", type="chat", note="status?",
+               data={"from": "user", "to": "agent-parser", "thread": "agent-parser"})
+    log.append(agent_id="root", node_id=None, type="info", note="not a chat")
+    with client.websocket_connect("/ws") as ws:
+        _snap, rest = hello(ws, last_seq=99)  # nothing replayed as event.append
+        messages = [m["payload"] for m in rest if m["type"] == "chat.message"]
+        assert [m["type"] for m in rest] == ["chat.message"] * 3 + ["bridge.status"]
+        assert [m["seq"] for m in messages] == [1, 2, 3]  # one per chat event, ascending
+        assert [m["thread"] for m in messages] == ["root", "root", "agent-parser"]
+        assert messages[1]["from"] == "root" and messages[1]["to"] == "user"
+        assert messages[2]["id"] == "chat-3" and messages[2]["node_id"] == "node-a"
+
+
+# ------------------------------------------------------------------- agent edit-in-run
+def _agent(client: TestClient, agent_id: str = "agent-a", node_id: str = "node-a"):
+    return _state(client).store.upsert_agent(agent_id, node_id)
+
+
+def test_agent_plan_edit_from_canvas(client: TestClient, project: Path) -> None:
+    _agent(client)
+    with client.websocket_connect("/ws") as ws:
+        hello(ws)
+        ws.send_json({"type": "agent.plan.edit", "payload": {"agent_id": "agent-zz", "plan_md": "x"}, "seq": 2})
+        err, _ = recv_until(ws, "server.error")
+        assert err["payload"]["code"] == "unknown_agent"
+        ws.send_json({"type": "agent.plan.edit", "payload": {"agent_id": "agent-a", "plan_md": "# Job spec\n\nUse the fixture corpus.\n"}, "seq": 3})
+        ack, seen = recv_until(ws, "edit.ack")
+        card = next(m for m in seen if m["type"] == "agent.card.upsert")["payload"]["agent"]
+        assert "Use the fixture corpus." in card["plan_md"] and ack["payload"]["forSeq"] == 3
+        ev, _ = recv_until(ws, "event.append")
+        p = ev["payload"]
+        assert p["type"] == "agent_plan_edited" and p["notified"] == ["agent-a"] and p["node_id"] == "node-a"
+        assert p["data"]["source"] == "canvas" and p["data"]["field"] == "plan_md"
+        assert p["data"]["path"] == ".whiteboard/agents/agent-a/plan.md"
+        assert "+Use the fixture corpus." in p["data"]["diff"]
+        assert p["note"] == "agent plan edited: agent-a — # Job spec"
+        # an identical rewrite is acked and nothing else
+        ws.send_json({"type": "agent.plan.edit", "payload": {"agent_id": "agent-a", "plan_md": "# Job spec\n\nUse the fixture corpus.\n"}, "seq": 4})
+        ack2, seen = recv_until(ws, "edit.ack")
+        assert [m["type"] for m in seen] == ["edit.ack"] and ack2["payload"]["forSeq"] == 4
+    assert (project / ".whiteboard" / "agents" / "agent-a" / "plan.md").read_text() == "# Job spec\n\nUse the fixture corpus.\n"
+    assert _bridge_lines(client) == ["agent plan edited: agent-a — # Job spec"]
+    assert [e["type"] for e in _events(client)] == ["agent_plan_edited"]
+
+
+def test_agent_diagram_edit_rejects_bad_mermaid(client: TestClient) -> None:
+    _agent(client)
+    with client.websocket_connect("/ws") as ws:
+        hello(ws)
+        ws.send_json({"type": "agent.diagram.edit", "payload": {"agent_id": "agent-a", "mermaid": "flowchart TD\n    A -->\n"}, "seq": 2})
+        rej, seen = recv_until(ws, "edit.reject")
+        assert rej["payload"]["revert"] == [] and rej["payload"]["forSeq"] == 2
+        assert "invalid mermaid" in rej["payload"]["reason"]
+        assert not any(m["type"] == "agent.card.upsert" for m in seen)
+        ws.send_json({"type": "agent.diagram.edit", "payload": {"agent_id": "agent-a", "mermaid": "flowchart TD\n    Parser[Parser] --> Ast[Ast]\n"}, "seq": 3})
+        ack, seen = recv_until(ws, "edit.ack")
+        card = next(m for m in seen if m["type"] == "agent.card.upsert")["payload"]["agent"]
+        assert [n["id"] for n in card["diagram"]["nodes"]] == ["Parser", "Ast"]
+        ev, _ = recv_until(ws, "event.append")
+        assert ev["payload"]["type"] == "agent_plan_edited" and ev["payload"]["data"]["field"] == "diagrams_md"
+        assert ev["payload"]["data"]["path"] == ".whiteboard/agents/agent-a/diagrams.md"
+    assert _bridge_lines(client) == ["agent diagram edited: agent-a — Parser[Parser] --> Ast[Ast]"]
+
+
+@pytest.mark.slow
+def test_external_agent_plan_edit_reaches_root(client: TestClient, project: Path) -> None:
+    _agent(client)
+    path = project / ".whiteboard" / "agents" / "agent-a" / "plan.md"
+    time.sleep(0.5)  # FSEvents warm-up
+    with client.websocket_connect("/ws") as ws:
+        hello(ws)
+        path.write_text("# Job spec: node-a\n\nAlso vendor the parser.\n")
+        up, _ = recv_until(ws, "agent.card.upsert", timeout=3.0)
+        assert "Also vendor the parser." in up["payload"]["agent"]["plan_md"]
+        ev, _ = recv_until(ws, "event.append", timeout=3.0)
+        p = ev["payload"]
+        assert p["type"] == "agent_plan_edited" and p["agent_id"] == "user" and p["notified"] == ["agent-a"]
+        assert p["data"]["source"] == "file" and p["data"]["field"] == "plan_md"
+        assert p["data"]["path"] == ".whiteboard/agents/agent-a/plan.md"
+    # pushed verbatim: no "external edit:" prefix, no [path] suffix
+    assert _bridge_lines(client) == ["agent plan edited: agent-a — Also vendor the parser."]

@@ -361,7 +361,7 @@ def test_full_loop_against_real_daemon() -> None:
         def chat_pushed() -> dict | None:
             for lines in list(inbox.connections):
                 for line in lines:
-                    if line.get("type") == "user" and "chat (to: agent-a)" in line.get("text", ""):
+                    if line.get("type") == "user" and "chat (to: agent-a, thread agent-a)" in line.get("text", ""):
                         return line
             return None
 
@@ -376,6 +376,67 @@ def test_full_loop_against_real_daemon() -> None:
         assert seqs == sorted(seqs) and len(set(seqs)) == len(seqs), f"push seqs must be strictly increasing: {seqs}"
         assert _health(port)["bridge"]["failures"] == 0
         clock.lap("h. chat.message -> inbox socket")
+
+        # -- h2. propose a board diagram, approve the owner's edit, monitor, answer chat ----
+        mark = canvas.mark()
+        proposal = mcp_call(
+            port, "propose_diagram", name="lld", rationale="node-c needs a cache",
+            mermaid="flowchart TD\n    node-c[C thing]\n    node-cache[Cache]\n    node-c --> node-cache\n",
+        )
+        rid = proposal["request_id"]
+        assert [n["id"] for n in proposal["nodes_added"]] == ["node-cache"]
+        req = canvas.wait("diagram.request", lambda m: m["payload"]["request_id"] == rid, since=mark)
+        assert req["payload"]["name"] == "lld" and req["payload"]["rationale"] == "node-c needs a cache"
+        assert [e["src"] for e in req["payload"]["edges_added"]] == ["node-c"]
+        assert not (nodes_dir / "node-cache.md").exists(), "a proposal must write nothing"
+        assert _health(port)["pending_diagrams"] == 1
+
+        mark = canvas.mark()
+        canvas.send("diagram.reply", {
+            "request_id": rid, "approved": True, "note": "with a better label",
+            "mermaid": "flowchart TD\n    node-c[C thing]\n    node-cache[Cache layer]\n    node-c --> node-cache\n",
+        })
+        approved = canvas.wait("event.append", lambda m: m["payload"]["type"] == "diagram_approved", since=mark)
+        assert approved["payload"]["data"] == {
+            "request_id": rid, "name": "lld", "note": "with a better label",
+            "edited": True, "created": ["node-cache"], "edges": 1,
+        }
+        canvas.wait("plan.node.upsert", lambda m: m["payload"]["node"]["id"] == "node-cache", since=mark)
+        lld = (project / ".whiteboard" / "plan" / "lld.md").read_text()
+        assert "node-cache[Cache layer]" in lld and "node-c --> node-cache" in lld
+        meta_cache, _ = _node_meta(project, "node-cache")
+        assert meta_cache["type"] == "lld" and meta_cache["depends_on"] == ["node-c"]
+        assert sorted(_node_meta(project, "node-c")[0]["depends_on"]) == ["node-a", "node-b"]  # cross-board deps kept
+        assert _health(port)["pending_diagrams"] == 0
+        assert "### LLD" in (project / ".whiteboard" / "PLAN.md").read_text()
+
+        # -- h3. report_progress + chat_reply: live monitoring and the second chat direction -
+        mark = canvas.mark()
+        progress = mcp_call(
+            port, "report_progress", agent_id="agent-b", activity="wiring the cache",
+            progress=0.5, metrics={"tool_calls": 3}, files_touched=["src/cache.py"],
+        )
+        assert progress["agent"]["activity"] == "wiring the cache" and progress["heartbeat_seq"]
+        canvas.wait(
+            "agent.card.upsert",
+            lambda m: m["payload"]["agent"]["id"] == "agent-b" and m["payload"]["agent"]["activity"] == "wiring the cache",
+            since=mark,
+        )
+        row = next(a for a in _health(port)["agents"] if a["id"] == "agent-b")
+        assert row["progress"] == 0.5 and row["metrics"] == {"tool_calls": 3, "files_touched": ["src/cache.py"]}
+        assert row["heartbeat_at"] and _health(port)["agent_count"] == 2
+
+        mark = canvas.mark()
+        reply = mcp_call(port, "chat_reply", from_id="root", text="cache approved, go ahead")
+        assert reply["message"]["thread"] == "root" and reply["message"]["from"] == "root"
+        projected = canvas.wait("chat.message", lambda m: m["payload"]["seq"] == reply["seq"], since=mark)
+        assert projected["payload"]["text"] == "cache approved, go ahead" and projected["payload"]["to"] == "user"
+        assert len([m for m in canvas.seen[mark:] if m["type"] == "chat.message"]) == 1  # projected once
+        threads = _get(port, "/api/threads")["threads"]
+        assert threads["root"]["count"] == 1 and threads["agent-a"]["count"] == 1
+        one = _get(port, f"/api/threads/root?since={reply['seq'] - 1}")
+        assert [m["id"] for m in one["messages"]] == [f"chat-{reply['seq']}"]
+        clock.lap("h2/h3. propose_diagram -> diagram.reply, report_progress, chat_reply")
 
         # -- i. restart: nothing lives only in memory ---------------------------------------
         before = _shape(_get(port, "/api/snapshot"))

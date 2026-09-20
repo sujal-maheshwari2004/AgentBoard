@@ -21,13 +21,12 @@ COLLABORATION = (REPO / "templates" / "COLLABORATION.md").read_text(encoding="ut
 
 #: Bullets whose emitter lands with the server stages (plan §A.2, §A.5, §A.6). Until those merge
 #: the registry documents them and nothing pushes them; the set must only ever shrink.
-PENDING_EMITTERS = {
-    "diagram approved: ",
-    "diagram rejected: ",
-    "agent plan edited: ",
-    "agent diagram edited: ",
-    # "acknowledged plan edit (event " — emitted by report_progress(ack_event_seq=) since A.S3.
-}
+PENDING_EMITTERS: set[str] = set()
+# Every registry prefix has an emitter since A.S4:
+#   "acknowledged plan edit (event " — report_progress(ack_event_seq=) (A.S3)
+#   "diagram approved: " / "diagram rejected: " — handlers.on_diagram_reply
+#   "agent plan edited: " / "agent diagram edited: " — handlers.on_agent_{plan,diagram}_edit
+#   (the same two lines also come from the store's external-edit summaries)
 
 #: v2 tools the root session is responsible for calling — they must be named in SKILL.md.
 ROOT_V2_TOOLS = (
@@ -126,6 +125,15 @@ def test_pending_emitters_only_shrinks() -> None:
         f"{sorted(PENDING_EMITTERS - still_pending)}"
     )
     assert PENDING_EMITTERS <= set(PREFIXES)
+
+
+def test_contracts_section_8_lists_every_tool() -> None:
+    """§8 is the tool contract: the table and the server must name the same 28 tools."""
+    from tests.test_mcp_tools import CONTRACT_TOOLS
+
+    section = _section(CONTRACTS, "## 8. MCP tools")
+    names = set(re.findall(r"^\| `([a-z_]+)` \|", section, re.M))
+    assert names == CONTRACT_TOOLS and len(names) == 28
 
 
 @pytest.mark.parametrize("tool", ROOT_V2_TOOLS)
