@@ -112,6 +112,19 @@ def test_health_agents_list(client: TestClient) -> None:
     assert row["progress"] == 1.0 and row["metrics"] == {"tool_calls": 7}
 
 
+def test_lifespan_flushes_dirty_cards_on_shutdown(project: Path) -> None:
+    """A heartbeat only marks the card dirty; the 5 s flusher (and shutdown) persists it."""
+    app = create_app(project)
+    card = project / ".whiteboard" / "agents" / "agent-a" / "card.md"
+    with TestClient(app):
+        store = app.state.store
+        store.upsert_agent("agent-a", "node-a")  # full commit: resets the write clock
+        store.touch_agent("agent-a", activity="parsing", progress=0.25)
+        assert "activity" not in card.read_text()  # throttled by CARD_WRITE_INTERVAL_S
+        assert store._dirty_cards == {"agent-a"}
+    assert "activity: parsing" in card.read_text() and "progress: 0.25" in card.read_text()
+
+
 def test_session_retarget(client: TestClient, tmp_path: Path) -> None:
     sock = tmp_path / "cc.sock"
     r = client.post("/api/session", json={"socket": str(sock), "token": "tok"})
