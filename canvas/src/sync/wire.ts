@@ -2,7 +2,7 @@
 import type { Editor } from 'tldraw'
 import { createSocket, socketUrl, type Socket } from '../ws/client'
 import { store, type Store } from '../state/store'
-import type { EditOp, LayoutPatch, NodeStatus, ServerMessage } from '../state/types'
+import type { ClientPayloads, EditOp, LayoutPatch, NodeStatus, ServerMessage } from '../state/types'
 import {
   applyLayout,
   applySnapshot,
@@ -36,6 +36,11 @@ export interface Wiring {
   /** B.6 folder editors; both return the seq so the sender can match an `edit.reject` */
   editAgentPlan(agentId: string, planMd: string): number
   editAgentDiagram(agentId: string, mermaid: string): number
+  /**
+   * B.10 owner verdict on a proposed board. Returns the send seq: the modal matches the
+   * `edit.ack` / `server.error {code:'bad_diagram'}` that comes back on it.
+   */
+  replyDiagram(reply: ClientPayloads['diagram.reply']): number
   relayout(): void
   /** re-apply the last known server truth (used after a rejected edit) */
   resync(): void
@@ -174,6 +179,9 @@ export function mountWiring(editor: Editor, s: Store = store, url: string = sock
     },
     editAgentDiagram(agentId, mermaid) {
       return socket.send('agent.diagram.edit', diagramEditPayload(agentId, mermaid))
+    },
+    replyDiagram(reply) {
+      return socket.send('diagram.reply', reply)
     },
     relayout() {
       const state = s.getState()

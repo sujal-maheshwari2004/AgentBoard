@@ -23,6 +23,7 @@ const state = structuredClone(snapshotFixture)
 let eventSeq = 40
 const events = []
 const pendingRisky = new Map() // request_id -> {ops, forSeq, ws}
+const pendingDiagrams = new Map() // request_id -> {name, mermaid, rationale} (B.10 / A.2)
 
 const now = () => new Date().toISOString()
 const iso = (ms) => new Date(ms).toISOString()
@@ -46,7 +47,23 @@ const http = createServer((req, res) => {
   const url = new URL(req.url ?? '/', 'http://localhost')
   if (url.pathname === '/api/health') {
     res.writeHead(200, { 'content-type': 'application/json' })
-    res.end(JSON.stringify({ ok: true, mock: true, rev: state.rev }))
+    res.end(JSON.stringify({ ok: true, mock: true, rev: state.rev, pending_diagrams: pendingDiagrams.size }))
+    return
+  }
+  // B.10 on demand: /api/mock/diagram?kind=good|bad[&name=lld] publishes one `diagram.request`.
+  // `kind=bad` proposes mermaid the server refuses, so the modal's error path is really exercised.
+  if (url.pathname === '/api/mock/diagram') {
+    const kind = url.searchParams.get('kind') ?? 'good'
+    const name = url.searchParams.get('name') ?? 'lld'
+    const payload = proposeDiagram(
+      name,
+      kind === 'bad' ? BAD_PROPOSAL : GOOD_PROPOSAL,
+      kind === 'bad'
+        ? 'the parser needs its own component box (this proposal is deliberately malformed)'
+        : 'the parser and store split along the file boundary, so each gets its own component box',
+    )
+    res.writeHead(200, { 'content-type': 'application/json' })
+    res.end(JSON.stringify(payload))
     return
   }
   if (!existsSync(DIST)) {
@@ -172,6 +189,104 @@ function replaceFence(md, mermaid) {
   return `${md.trimEnd()}\n\n${fence}\n`.trimStart()
 }
 
+// ---- diagram proposals (A.2 / B.10) -------------------------------------------------------
+const GOOD_PROPOSAL = `flowchart TD
+    node-parser["Mermaid parser"]
+    node-store["Plan store"]
+    node-render["Canvas renderer"]
+    node-parser --> node-store
+    node-store --> node-render
+`
+/** no `flowchart TD` header: `badMermaid` refuses it exactly as `validate_diagram` would */
+const BAD_PROPOSAL = `nodes:
+    node-parser["Mermaid parser"]
+    node-parser --> node-store
+`
+
+/** the mock's stand-in for `whiteboard.mermaid.parse`: box ids, labels and `-->` edges */
+function parseMermaid(text) {
+  const nodes = []
+  const edges = []
+  for (const raw of String(text ?? '').split('\n')) {
+    const line = raw.trim()
+    if (!line || /^(flowchart|graph)\b/.test(line) || line.startsWith('%%')) continue
+    const edge = line.match(/^([\w-]+)\s*--(?:\s*\|([^|]*)\|\s*)?>\s*([\w-]+)/)
+    if (edge) {
+      edges.push({ src: edge[1], dst: edge[3], label: edge[2]?.trim() || null })
+      continue
+    }
+    const node = line.match(/^([\w-]+)\s*[[({]"?([^\]")}]*)"?[\])}]/)
+    if (node) nodes.push({ id: node[1], label: node[2].trim() })
+  }
+  return { nodes, edges }
+}
+
+/** `store.diagram_diff(name, mermaid)`: the proposal against the board as it is right now */
+function diagramDiff(name, mermaid) {
+  const { nodes, edges } = parseMermaid(mermaid)
+  const ids = new Set(nodes.map((n) => n.id))
+  const onBoard = state.nodes.filter((n) => (n.type ?? 'hld') === name)
+  const boardEdges = state.edges.filter((e) => (e.diagram ?? 'hld') === name)
+  const key = (e) => `${e.src}__${e.dst}`
+  const have = new Set(boardEdges.map(key))
+  return {
+    nodes_added: nodes.filter((n) => !findNode(n.id)),
+    nodes_removed: onBoard.filter((n) => !ids.has(n.id)).map((n) => n.id),
+    edges_added: edges.filter((e) => !have.has(key(e))),
+    edges_removed: boardEdges
+      .filter((e) => !edges.some((p) => key(p) === key(e)))
+      .map((e) => ({ src: e.src, dst: e.dst, label: e.label ?? null })),
+  }
+}
+
+function diagramRequestPayload(rid, pending) {
+  return {
+    request_id: rid,
+    name: pending.name,
+    mermaid: pending.mermaid,
+    rationale: pending.rationale,
+    ...diagramDiff(pending.name, pending.mermaid),
+  }
+}
+
+function proposeDiagram(name, mermaid, rationale) {
+  const request_id = Math.random().toString(16).slice(2, 10)
+  const pending = { name, mermaid, rationale }
+  pendingDiagrams.set(request_id, pending)
+  const payload = diagramRequestPayload(request_id, pending)
+  broadcast('diagram.request', payload)
+  appendEvent({ agent_id: 'root', node_id: null, type: 'diagram_proposed', note: `proposed ${name}`, data: { request_id, name } })
+  log('proposed diagram', name, request_id)
+  return payload
+}
+
+/** approval is the only path that writes a board: create the boxes and edges it names */
+function writeDiagram(name, mermaid) {
+  const { nodes, edges } = parseMermaid(mermaid)
+  for (const n of nodes) {
+    let node = findNode(n.id)
+    if (!node) {
+      node = { id: n.id, type: name, title: n.label || n.id, status: 'todo', owner: null, depends_on: [], interfaces: [], body: '' }
+      state.nodes.push(node)
+    } else if (n.label) node.title = n.label
+    broadcast('plan.node.upsert', { node })
+  }
+  for (const e of edges) {
+    let edge = state.edges.find((x) => x.src === e.src && x.dst === e.dst)
+    if (!edge) {
+      edge = { src: e.src, dst: e.dst, label: e.label, diagram: name }
+      state.edges.push(edge)
+    }
+    const dst = findNode(e.dst)
+    if (dst && !dst.depends_on.includes(e.src)) {
+      dst.depends_on.push(e.src)
+      broadcast('plan.node.upsert', { node: dst })
+    }
+    broadcast('plan.edge.upsert', { edge })
+  }
+  return { nodes: nodes.length, edges: edges.length }
+}
+
 function findNode(id) {
   return state.nodes.find((n) => n.id === id)
 }
@@ -271,6 +386,8 @@ function handle(client, msg) {
       for (const ev of events) {
         if (ev.seq > since) client.ws.send(JSON.stringify({ type: 'event.append', payload: ev, seq: ev.seq, ts: ev.ts, replyTo: null }))
       }
+      // A.2.5: every still-pending proposal is re-sent on hello, with its diff recomputed
+      for (const [rid, pending] of pendingDiagrams) sendTo(client, 'diagram.request', diagramRequestPayload(rid, pending))
       sendTo(client, 'bridge.status', { ok: true, failures: 0 })
       if (!client.scriptStarted) {
         client.scriptStarted = true
@@ -407,6 +524,40 @@ function handle(client, msg) {
       broadcast('agent.card.upsert', { agent: a })
       sendTo(client, 'edit.ack', { forSeq: seq, rev: ++state.rev }, { replyTo: seq })
       appendEvent({ agent_id: 'user', node_id: a.assigned_node, type: 'agent_plan_edited', note: `agent diagram edited: ${a.id}`, data: { source: 'canvas', field: 'diagrams_md' } })
+      break
+    }
+    case 'diagram.reply': {
+      const rid = payload.request_id
+      const pending = pendingDiagrams.get(rid)
+      if (!pending) {
+        sendTo(client, 'server.error', { forSeq: seq, code: 'unknown_request', message: `no diagram proposal ${rid}` })
+        break
+      }
+      const text = (payload.mermaid || '').trim() || pending.mermaid
+      const edited = Boolean(payload.mermaid) && payload.mermaid.trim() !== pending.mermaid.trim()
+      if (!payload.approved) {
+        pendingDiagrams.delete(rid)
+        sendTo(client, 'edit.ack', { forSeq: seq, rev: state.rev }, { replyTo: seq })
+        appendEvent({ agent_id: 'user', node_id: null, type: 'diagram_rejected', note: `diagram rejected: ${pending.name} (req ${rid})`, data: { request_id: rid, note: payload.note ?? '' } })
+        break
+      }
+      const reason = badMermaid(text)
+      if (reason) {
+        // A.2: the proposal STAYS pending, so the modal reopens with the owner's edit intact
+        sendTo(client, 'server.error', { forSeq: seq, code: 'bad_diagram', message: reason })
+        break
+      }
+      pendingDiagrams.delete(rid)
+      const wrote = writeDiagram(pending.name, text)
+      state.rev += 1
+      sendTo(client, 'edit.ack', { forSeq: seq, rev: state.rev }, { replyTo: seq })
+      appendEvent({
+        agent_id: 'user',
+        node_id: null,
+        type: 'diagram_approved',
+        note: `diagram approved: ${pending.name} (req ${rid}; ${wrote.nodes} nodes, ${wrote.edges} edges)`,
+        data: { request_id: rid, name: pending.name, note: payload.note ?? '', edited },
+      })
       break
     }
     case 'node.status': {

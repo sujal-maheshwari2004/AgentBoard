@@ -82,6 +82,18 @@ describe('reducer', () => {
     expect(s.ticker.filter((t) => ['needs_input', 'dispatch', 'risky_edit'].includes(t.kind))).toHaveLength(3)
   })
 
+  it('queues diagram proposals, replacing an entry a client.hello re-send repeats (B.10)', () => {
+    let s = loaded()
+    const g = { request_id: 'g1', name: 'lld', mermaid: 'flowchart TD', rationale: 'why', nodes_added: [{ id: 'node-x', label: 'X' }], nodes_removed: [], edges_added: [], edges_removed: [] }
+    s = reduce(s, msg('diagram.request', g))
+    s = reduce(s, msg('diagram.request', { ...g, nodes_added: [], error: 'no longer parses' }))
+    expect(s.diagramRequests).toHaveLength(1)
+    expect(s.diagramRequests[0]).toMatchObject({ request_id: 'g1', error: 'no longer parses', nodes_added: [] })
+    s = reduce(s, msg('diagram.request', { ...g, request_id: 'g2', name: 'er' }))
+    expect(s.diagramRequests.map((d) => d.request_id)).toEqual(['g1', 'g2'])
+    expect(s.ticker.filter((t) => t.kind === 'diagram')).toHaveLength(3)
+  })
+
   it('handles ack / reject / layout / error / bridge', () => {
     let s = loaded()
     s = reduce(s, msg('edit.ack', { forSeq: 3, rev: 8 }))
@@ -93,6 +105,9 @@ describe('reducer', () => {
     expect(s.layout.hld.nodes).toEqual({ 'node-a': { x: 1, y: 2 } })
     s = reduce(s, msg('server.error', { code: 'bad', message: 'boom' }))
     expect(s.lastError).toMatchObject({ code: 'bad', message: 'boom' })
+    // `forSeq` is how the diagram modal knows a `bad_diagram` belongs to its own reply (B.10)
+    s = reduce(s, msg('server.error', { forSeq: 12, code: 'bad_diagram', message: 'cycle' }))
+    expect(s.lastError).toMatchObject({ forSeq: 12, code: 'bad_diagram' })
     s = reduce(s, msg('bridge.status', { ok: false, failures: 2, last_error: 'socket gone' }))
     expect(s.bridge).toEqual({ ok: false, failures: 2, last_error: 'socket gone' })
   })
@@ -111,6 +126,7 @@ describe('reducer', () => {
       needs_input: { prompt_id: 'p', agent_id: 'a', node_id: null, question: 'q', kind: 'confirm', choices: [] },
       'dispatch.request': { request_id: 'd', node_id: 'n', agent_id: 'a', job_spec_md: '' },
       'risky_edit.request': { request_id: 'r', summary: 's', diff: '', affected: [] },
+      'diagram.request': { request_id: 'dg', name: 'lld', mermaid: 'flowchart TD', rationale: '', nodes_added: [], nodes_removed: [], edges_added: [], edges_removed: [] },
       'edit.ack': { forSeq: 1, rev: 100 },
       'edit.reject': { forSeq: 1, reason: 'r', revert: [] },
       'layout.update': { diagram: 'hld', layout: { version: 2 } },
@@ -145,8 +161,12 @@ describe('createStore', () => {
     s.removeDispatch('d1')
     s.dispatch(msg('risky_edit.request', { request_id: 'r1', summary: '', diff: '', affected: [] }))
     s.removeRiskyEdit('r1')
+    s.dispatch(msg('diagram.request', { request_id: 'g1', name: 'lld', mermaid: 'flowchart TD', rationale: '', nodes_added: [], nodes_removed: [], edges_added: [], edges_removed: [] }))
+    expect(s.getState().diagramRequests).toHaveLength(1)
+    s.removeDiagramRequest('g1')
     expect(s.getState().dispatches).toEqual([])
     expect(s.getState().riskyEdits).toEqual([])
+    expect(s.getState().diagramRequests).toEqual([])
     s.note('chat', 'hello')
     expect(s.getState().ticker.at(-1)).toMatchObject({ kind: 'chat', text: 'hello' })
     off()

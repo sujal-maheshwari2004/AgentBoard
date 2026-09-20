@@ -138,6 +138,22 @@ export interface NeedsInputPrompt {
 }
 export interface DispatchRequest { request_id: string; node_id: string; agent_id: string; job_spec_md: string }
 export interface RiskyEditRequest { request_id: string; summary: string; diff: string; affected: string[] }
+
+/** §6 `diagram.request` — one board proposal awaiting the owner's approval (A.2 / B.10) */
+export interface DiagramNodeRef { id: string; label?: string | null }
+export interface DiagramEdgeRef { src: string; dst: string; label?: string | null }
+export interface DiagramRequest {
+  request_id: string
+  name: string
+  mermaid: string
+  rationale: string
+  nodes_added: DiagramNodeRef[]
+  nodes_removed: string[]
+  edges_added: DiagramEdgeRef[]
+  edges_removed: DiagramEdgeRef[]
+  /** set when the `client.hello` re-send recomputes the diff and the proposal no longer validates */
+  error?: string | null
+}
 export interface BridgeStatus { ok: boolean; failures: number; last_error?: string }
 
 export type ServerMessage =
@@ -152,6 +168,7 @@ export type ServerMessage =
   | Envelope<'needs_input', NeedsInputPrompt>
   | Envelope<'dispatch.request', DispatchRequest>
   | Envelope<'risky_edit.request', RiskyEditRequest>
+  | Envelope<'diagram.request', DiagramRequest>
   | Envelope<'edit.ack', { forSeq: number; rev: number }>
   | Envelope<'edit.reject', { forSeq: number; reason: string; revert: EditOp[] }>
   | Envelope<'layout.update', { diagram: string; layout: Layout }>
@@ -169,6 +186,8 @@ export interface ClientPayloads {
   'prompt.reply': { prompt_id: string; value: unknown }
   'dispatch.reply': { request_id: string; approved: boolean; note?: string }
   'risky_edit.reply': { request_id: string; approved: boolean; note: string }
+  /** B.10: the owner's verdict on a proposed board; `mermaid` (their edit) wins when present */
+  'diagram.reply': { request_id: string; approved: boolean; note?: string; mermaid?: string }
   'plan.relayout': { diagram: string }
   'node.status': { id: string; status: NodeStatus }
   /** B.6: the folder's plan textarea, debounced 800ms (A.6 `on_agent_plan_edit`) */
@@ -183,7 +202,8 @@ export type SocketStatus = 'connecting' | 'open' | 'closed' | 'reconnecting'
 export const SERVER_MESSAGE_TYPES: ServerMessageType[] = [
   'plan.snapshot', 'plan.node.upsert', 'plan.node.delete', 'plan.edge.upsert', 'plan.edge.delete',
   'agent.card.upsert', 'agent.card.delete', 'event.append', 'needs_input', 'dispatch.request',
-  'risky_edit.request', 'edit.ack', 'edit.reject', 'layout.update', 'server.error', 'bridge.status',
+  'risky_edit.request', 'diagram.request', 'edit.ack', 'edit.reject', 'layout.update', 'server.error',
+  'bridge.status',
 ]
 
 export function edgeKey(src: string, dst: string): string {

@@ -2,8 +2,8 @@
 // Holds the last-known server truth plus UI-only state. Files are truth: nothing here persists.
 import { useSyncExternalStore } from 'react'
 import type {
-  AgentCard, BridgeStatus, Diagram, DispatchRequest, Layout, NeedsInputPrompt, PlanEdge, PlanEvent,
-  PlanNode, RiskyEditRequest, ServerMessage, SocketStatus,
+  AgentCard, BridgeStatus, Diagram, DiagramRequest, DispatchRequest, Layout, NeedsInputPrompt, PlanEdge,
+  PlanEvent, PlanNode, RiskyEditRequest, ServerMessage, SocketStatus,
 } from './types'
 import { edgeKey, primaryDiagram } from './types'
 import { DEFAULT_BOARD, isBoardName } from '../sync/boards'
@@ -32,6 +32,8 @@ export interface StoreState {
   prompts: NeedsInputPrompt[]
   dispatches: DispatchRequest[]
   riskyEdits: RiskyEditRequest[]
+  /** B.10: board proposals awaiting the owner; re-sent on `client.hello`, so dedupe by `request_id` */
+  diagramRequests: DiagramRequest[]
   ticker: TickerEntry[]
   bridge: BridgeStatus | null
   socket: SocketStatus
@@ -45,7 +47,7 @@ export interface StoreState {
   lastSeq: number
   lastAck: { forSeq: number; rev: number } | null
   lastReject: { forSeq: number; reason: string; seq: number } | null
-  lastError: { code: string; message: string; seq: number } | null
+  lastError: { code: string; message: string; seq: number; forSeq?: number } | null
 }
 
 export const TICKER_LIMIT = 200
@@ -64,6 +66,7 @@ export function initialState(): StoreState {
     prompts: [],
     dispatches: [],
     riskyEdits: [],
+    diagramRequests: [],
     ticker: [],
     bridge: null,
     socket: 'connecting',
@@ -198,6 +201,17 @@ export function reduce(state: StoreState, msg: ServerMessage): StoreState {
         ticker: pushTicker(state.ticker, { seq: msg.seq, ts: msg.ts, kind: 'risky_edit', text: `risky edit: ${r.summary}` }),
       }
     }
+    case 'diagram.request': {
+      const d = msg.payload
+      // A re-send (hello replay) REPLACES the entry: its diff was recomputed and it may now
+      // carry an `error`, which the modal has to show.
+      const at = state.diagramRequests.findIndex((q) => q.request_id === d.request_id)
+      return {
+        ...state,
+        diagramRequests: at >= 0 ? state.diagramRequests.map((q, i) => (i === at ? d : q)) : [...state.diagramRequests, d],
+        ticker: pushTicker(state.ticker, { seq: msg.seq, ts: msg.ts, kind: 'diagram', text: `diagram proposed: ${d.name} (req ${d.request_id})` }),
+      }
+    }
     case 'edit.ack':
       return { ...state, rev: msg.payload.rev, lastAck: msg.payload }
     case 'edit.reject':
@@ -211,7 +225,7 @@ export function reduce(state: StoreState, msg: ServerMessage): StoreState {
     case 'server.error':
       return {
         ...state,
-        lastError: { code: msg.payload.code, message: msg.payload.message, seq: msg.seq },
+        lastError: { code: msg.payload.code, message: msg.payload.message, seq: msg.seq, forSeq: msg.payload.forSeq },
         ticker: pushTicker(state.ticker, { seq: msg.seq, ts: msg.ts, kind: 'error', text: `server error ${msg.payload.code}: ${msg.payload.message}` }),
       }
     case 'bridge.status':
@@ -232,6 +246,7 @@ export interface Store {
   removePrompt(promptId: string): void
   removeDispatch(requestId: string): void
   removeRiskyEdit(requestId: string): void
+  removeDiagramRequest(requestId: string): void
   note(kind: string, text: string): void
   /** stop the `nowMs` interval (unmount / tests); it re-arms on the next live agent */
   stopClock(): void
@@ -313,6 +328,9 @@ export function createStore(init: StoreState = initialState(), timers: StoreTime
     },
     removeRiskyEdit(requestId) {
       store.set((s) => ({ riskyEdits: s.riskyEdits.filter((r) => r.request_id !== requestId) }))
+    },
+    removeDiagramRequest(requestId) {
+      store.set((s) => ({ diagramRequests: s.diagramRequests.filter((d) => d.request_id !== requestId) }))
     },
     stopClock() {
       if (clock !== null) {

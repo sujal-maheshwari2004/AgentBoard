@@ -9,6 +9,7 @@ import { installZoomTracking } from '../sync/apply'
 import { FrameChrome, getShapeVisibility } from '../sync/frame'
 import { mountWiring } from '../sync/wire'
 import { ChatBox } from '../panels/ChatBox'
+import { DiagramProposal } from '../panels/DiagramProposal'
 import { DispatchPopup } from '../panels/DispatchPopup'
 import { EventTicker } from '../panels/EventTicker'
 import { NeedsInputModal } from '../panels/NeedsInputModal'
@@ -63,6 +64,7 @@ export function App() {
       <ChatBox />
       <NeedsInputModal />
       <DispatchPopup />
+      <DiagramProposal />
       <RiskyEditConfirm />
     </div>
   )

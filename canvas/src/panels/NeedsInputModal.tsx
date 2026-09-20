@@ -8,8 +8,9 @@ export function NeedsInputModal() {
   const prompts = useStore((s) => s.prompts)
   const dispatches = useStore((s) => s.dispatches)
   const risky = useStore((s) => s.riskyEdits)
-  // dispatch and risky-edit popups take precedence so one prompt is visible at a time
-  if (dispatches.length || risky.length) return null
+  const diagrams = useStore((s) => s.diagramRequests)
+  // B.8 precedence: risky edit → diagram proposal → dispatch → needs_input
+  if (dispatches.length || risky.length || diagrams.length) return null
   const p = prompts[0]
   if (!p) return null
   return <PromptDialog key={p.prompt_id} prompt={p} remaining={prompts.length - 1} />

@@ -291,3 +291,82 @@
 @media (prefers-color-scheme: dark) {
   :root:not([data-theme='light']) .wb-board-seg.active { color: #171717; }
 }
+
+/* ---------- diagram-proposal modal (B.10) ---------- */
+
+.wb-modal h3 {
+  margin: var(--wb-s5) 0 var(--wb-s3);
+  font-size: var(--wb-t3);
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  text-transform: uppercase;
+  color: var(--wb-text-3);
+}
+.wb-modal h3 label { cursor: pointer; }
+
+.wb-why { margin: 0; color: var(--wb-text-2); }
+.wb-why .lead { color: var(--wb-text); font-weight: 600; }
+
+.wb-changes {
+  border: 1px solid var(--wb-border);
+  border-radius: var(--wb-r2);
+  background: var(--wb-island-2);
+  padding: var(--wb-s3);
+  max-height: 22vh;
+  overflow: auto;
+  display: flex;
+  flex-direction: column;
+  gap: var(--wb-s1);
+}
+
+.wb-change {
+  display: flex;
+  align-items: baseline;
+  gap: var(--wb-s3);
+  font-size: var(--wb-t3);
+  line-height: 1.5;
+}
+.wb-change code { font-family: var(--wb-mono); }
+.wb-change .sign { font-family: var(--wb-mono); font-weight: 700; width: 1ch; }
+/* the spoken half of the +/− encoding (B.1 pattern 12: colour is never the only signal) */
+.wb-change .what {
+  color: var(--wb-text-3);
+  font-size: var(--wb-t2);
+  text-transform: uppercase;
+  letter-spacing: 0.02em;
+}
+.wb-change .detail { color: var(--wb-text-2); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.wb-change.added .sign, .wb-change.added code { color: var(--wb-done); }
+.wb-change.removed .sign, .wb-change.removed code { color: var(--wb-blocked); }
+.wb-change.removed code { text-decoration: line-through; }
+.wb-change.none { color: var(--wb-text-3); font-style: italic; }
+
+/* the server left the proposal pending (`bad_diagram`): the message sits above the textarea */
+.wb-diagram-error {
+  margin-top: var(--wb-s4);
+  padding: var(--wb-s3) var(--wb-s4);
+  border: 1px solid var(--wb-blocked);
+  border-radius: var(--wb-r2);
+  background: color-mix(in srgb, var(--wb-blocked) 10%, var(--wb-island));
+  color: var(--wb-blocked);
+  font-size: var(--wb-t3);
+  font-family: var(--wb-mono);
+  white-space: pre-wrap;
+}
+
+.wb-mermaid {
+  font-family: var(--wb-mono);
+  font-size: var(--wb-t3);
+  line-height: 1.5;
+  white-space: pre;
+  overflow-wrap: normal;
+  tab-size: 4;
+}
+
+.wb-note-row {
+  display: flex;
+  align-items: center;
+  gap: var(--wb-s4);
+  margin-top: var(--wb-s5);
+}
+.wb-note-row > span { color: var(--wb-text-2); font-size: var(--wb-t3); }
