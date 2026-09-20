@@ -1,0 +1,49 @@
+/*
+ * Edge styling (plan B.4). The shape stays a tldraw `arrow` with its two bindings and the
+ * deterministic binding ids — `collect.ts` reads those records and its tests are pinned. Only the
+ * paint changes: the wrapper carries `data-wb-edge` derived from `meta.srcStatus`/`meta.dstStatus`
+ * (see `edgeState` in sync/apply.ts) and these rules override the presentation attributes tldraw
+ * puts on the arrow's stroke group.
+ *
+ * Solid = settled, marching dashes = in flight (Temporal + React Flow's `dashdraw`).
+ */
+
+@keyframes wb-dashdraw {
+  from {
+    stroke-dashoffset: 10;
+  }
+}
+
+/* 2px zoom-compensated: `--wb-zoom` is written on the editor container at camera stop */
+.tl-shape[data-wb-edge] .tl-svg-container > g {
+  stroke: var(--wb-border-2);
+  stroke-width: calc(2px / var(--wb-zoom, 1));
+}
+
+/* the dependency is satisfied */
+.tl-shape[data-wb-edge='done'] .tl-svg-container > g {
+  stroke: color-mix(in srgb, var(--wb-done) 60%, transparent);
+}
+
+/* the source is running */
+.tl-shape[data-wb-edge='working'] .tl-svg-container > g {
+  stroke: var(--wb-working);
+}
+.tl-shape[data-wb-edge='working'] .tl-svg-container > g > g > path {
+  stroke-dasharray: 5;
+  animation: wb-dashdraw 0.5s linear infinite;
+}
+
+/* into a blocked node: the failing path is lit up the spine (Phoenix), z-index above its neighbours */
+.tl-shape[data-wb-edge='blocked'] {
+  z-index: 1;
+}
+.tl-shape[data-wb-edge='blocked'] .tl-svg-container > g {
+  stroke: var(--wb-blocked);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .tl-shape[data-wb-edge='working'] .tl-svg-container > g > g > path {
+    animation: none;
+  }
+}
