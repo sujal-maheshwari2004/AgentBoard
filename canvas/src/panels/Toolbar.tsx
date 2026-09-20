@@ -4,11 +4,18 @@ import type { NodeStatus } from '../state/types'
 import { kindOf } from '../sync/apply'
 import { boardFrameId } from '../sync/boards'
 import { toggleFrame } from '../sync/frame'
+import { cameraAnimation } from '../sync/motion'
 import { getWiring } from '../sync/wire'
 import { BoardSwitcher } from './BoardSwitcher'
 import { PastePlanButton } from './PastePlan'
 
 const STATUSES: NodeStatus[] = ['todo', 'in_progress', 'blocked', 'done']
+
+/** every status carries a spoken label, never colour alone (B.1 item 12) */
+function bridgeLabel(bridge: { ok: boolean; failures: number; last_error?: string } | null): string {
+  if (!bridge) return 'push bridge: status unknown'
+  return `push bridge: ${bridge.ok ? 'ok' : 'failing'}, ${bridge.failures} failure(s)${bridge.last_error ? ` (${bridge.last_error})` : ''}`
+}
 
 const TOOLS: Array<{ id: string; label: string; key: string }> = [
   { id: 'select', label: 'Select', key: 'V' },
@@ -64,7 +71,7 @@ export function Toolbar({ editor }: { editor: Editor | null }) {
       <button className="wb-btn" disabled={!editor} onClick={() => getWiring()?.relayout()} title="Re-run dagre for unpinned nodes">
         Re-layout
       </button>
-      <button className="wb-btn" disabled={!editor} onClick={() => editor?.zoomToFit({ animation: { duration: 200 } })}>
+      <button className="wb-btn" disabled={!editor} onClick={() => editor?.zoomToFit({ animation: cameraAnimation(200) })}>
         Zoom to fit
       </button>
       <button
@@ -81,7 +88,13 @@ export function Toolbar({ editor }: { editor: Editor | null }) {
         {selectedNodeId ? (
           <>
             <span style={{ marginRight: 4 }}>{selectedNodeId}</span>
-            <select className="wb-select" value={selectedNode?.status ?? 'todo'} onChange={(e) => setStatus(e.target.value as NodeStatus)}>
+            <select
+              className="wb-select"
+              aria-label={`Status of ${selectedNodeId}`}
+              title={`Status of ${selectedNodeId}`}
+              value={selectedNode?.status ?? 'todo'}
+              onChange={(e) => setStatus(e.target.value as NodeStatus)}
+            >
               {STATUSES.map((s) => (
                 <option key={s} value={s}>
                   {s}
@@ -90,17 +103,22 @@ export function Toolbar({ editor }: { editor: Editor | null }) {
             </select>
           </>
         ) : (
-          <span style={{ color: '#9aa0a6' }}>select a node to set status</span>
+          <span style={{ color: 'var(--wb-text-3)' }}>select a node to set status</span>
         )}
       </label>
       <span className="sep" />
       <span className="wb-status" title={`socket ${socket}`}>
-        <span className={`wb-dot ${socket === 'open' ? 'ok' : socket === 'reconnecting' || socket === 'connecting' ? 'warn' : 'bad'}`} />
-        socket
+        <span
+          className={`wb-dot ${socket === 'open' ? 'ok' : socket === 'reconnecting' || socket === 'connecting' ? 'warn' : 'bad'}`}
+          role="img"
+          title={`socket ${socket}`}
+          aria-label={`socket ${socket}`}
+        />
+        socket · {socket}
       </span>
-      <span className="wb-status" title={bridge ? `bridge ok=${bridge.ok} failures=${bridge.failures}${bridge.last_error ? ` (${bridge.last_error})` : ''}` : 'bridge status unknown'}>
-        <span className={`wb-dot ${bridge ? (bridge.ok ? 'ok' : 'bad') : ''}`} />
-        bridge
+      <span className="wb-status" title={bridgeLabel(bridge)}>
+        <span className={`wb-dot ${bridge ? (bridge.ok ? 'ok' : 'bad') : ''}`} role="img" title={bridgeLabel(bridge)} aria-label={bridgeLabel(bridge)} />
+        bridge · {bridge ? (bridge.ok ? 'ok' : 'failing') : 'unknown'}
       </span>
       {project && (
         <span className="wb-status" title={`rev ${rev}`}>

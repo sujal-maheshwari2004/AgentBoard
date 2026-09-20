@@ -5,6 +5,7 @@
 // on the one page, routed by `node.type`; everything that used to be a singleton now takes a
 // `frameId`.
 import {
+  Box,
   react,
   toRichText,
   type Editor,
@@ -31,22 +32,26 @@ import {
 } from '../shapes/agentFolder'
 import type { AgentFolderShape } from '../shapes/AgentFolderUtil'
 import { PLAN_NODE_H, PLAN_NODE_W, type PlanNodeShape } from '../shapes/PlanNodeUtil'
+import { cameraAnimation } from './motion'
 import { borderAlpha, zoomAtom } from './zoom'
 import {
   BOARDS,
   COLLAPSED_BOARD_H,
-  boardAtPoint,
   boardFrameId,
   boardLayoutKey,
   boardOf,
   boardOfFrameId,
   boardOfShape,
+  boardForViewport,
   boardSpecsFor,
+  contentSize,
+  contentViewBox,
   edgeScope,
   ensureBoards,
   notifyBoardReparent,
   presentBoards,
   type BoardName,
+  type BoxLike,
 } from './boards'
 import {
   agentShapeId,
@@ -66,6 +71,8 @@ export const COLLAPSED_H = COLLAPSED_BOARD_H
 export const AGENT_GAP = 60
 /** the plan-node label hangs below the box (B.3); reserve room for it when growing the frame */
 export const PLAN_NODE_LABEL_H = 40
+/** the board's title strip above the frame edge (tldraw's frame label + our disclosure button) */
+export const BOARD_HEADER_H = 40
 
 export function remote(editor: Editor, fn: () => void): void {
   editor.store.mergeRemoteChanges(() => editor.run(fn, { history: 'ignore' }))
@@ -159,25 +166,57 @@ export function frameOrigin(editor: Editor, frameId: TLShapeId): { x: number; y:
   return spec ? { x: spec.x, y: spec.y } : { x: 0, y: 0 }
 }
 
-/** grow (never shrink) the frame so every child fits, unless collapsed */
+/** the frame-local boxes of everything a board holds (nodes, human boxes, folders) */
+export function frameChildBoxes(editor: Editor, frameId: TLShapeId): BoxLike[] {
+  const out: BoxLike[] = []
+  for (const cid of editor.getSortedChildIdsForParent(frameId)) {
+    const s = editor.getShape(cid)
+    if (!s || s.meta?.hidden) continue
+    const props = (s as Partial<NodeShape>).props
+    if (!props || typeof props.w !== 'number' || typeof props.h !== 'number') continue
+    out.push({ x: s.x, y: s.y, w: props.w, h: props.h })
+  }
+  return out
+}
+
+/**
+ * Size the frame to its content (B.S6 item 2), never below `BOARD_MIN_*` — a board is as big as
+ * what is on it, not a fixed 1600x1000 rectangle with six small boxes lost inside it. Collapsed
+ * frames are left alone.
+ */
 export function fitFrame(editor: Editor, frameId: TLShapeId): void {
   const frame = getFrame(editor, frameId)
   if (!frame || frame.meta.collapsed) return
-  let w = frame.props.w
-  let h = frame.props.h
-  for (const cid of editor.getSortedChildIdsForParent(frame.id)) {
-    const s = editor.getShape(cid)
-    if (!s || (s.type !== 'geo' && s.type !== 'plan-node')) continue
-    const g = s as NodeShape
-    w = Math.max(w, g.x + g.props.w + FRAME_PAD)
-    // the label hangs below the box, so leave room for it inside the frame
-    h = Math.max(h, g.y + g.props.h + PLAN_NODE_LABEL_H + FRAME_PAD)
-  }
+  const { w, h } = contentSize(frameChildBoxes(editor, frameId), {
+    pad: FRAME_PAD,
+    // the label hangs below the box (B.3), so reserve that strip inside the frame
+    extra: PLAN_NODE_LABEL_H,
+  })
   if (w !== frame.props.w || h !== frame.props.h) {
     remote(editor, () => {
       editor.updateShape<TLFrameShape>({ id: frame.id, type: 'frame', props: { w, h }, meta: { ...frame.meta, expandedH: h } })
     })
   }
+}
+
+/**
+ * Put the camera on one board's *content* (B.S6 item 2). Called once after the first snapshot:
+ * the owner should land looking at the plan, not at an empty corner of a big frame.
+ */
+export function fitCameraToBoard(editor: Editor, board: string, opts: { inset?: number; durationMs?: number } = {}): boolean {
+  const frameId = boardFrameId(board)
+  const frame = getFrame(editor, frameId)
+  if (!frame) return false
+  const box = contentViewBox(
+    { x: frame.x, y: frame.y, w: frame.props.w, h: frame.props.h },
+    frame.meta.collapsed ? [] : frameChildBoxes(editor, frameId),
+    { pad: FRAME_PAD, extra: PLAN_NODE_LABEL_H, header: BOARD_HEADER_H },
+  )
+  editor.zoomToBounds(new Box(box.x, box.y, box.w, box.h), {
+    inset: opts.inset ?? 48,
+    animation: cameraAnimation(opts.durationMs ?? 0),
+  })
+  return true
 }
 
 export function fitAllFrames(editor: Editor): void {
@@ -611,7 +650,7 @@ export function revealAgentFolder(editor: Editor, agentId: string): boolean {
   if (!folder) return false
   if (folder.meta.collapsed) notifyFolderCollapse(editor, folder.id, false)
   editor.select(folder.id)
-  editor.zoomToSelection({ animation: { duration: 250 } })
+  editor.zoomToSelection({ animation: cameraAnimation(250) })
   return true
 }
 
@@ -731,6 +770,10 @@ export function applySnapshot(editor: Editor, snap: PlanSnapshot): void {
   // edges
   for (const e of snap.edges) upsertEdge(editor, e)
   refreshEdgeStates(editor)
+
+  // Size each board to its content BEFORE the agents are placed: a card's default slot is
+  // "below my owner board", so it has to read the final frame height (B.S6 item 2).
+  for (const board of present) fitFrame(editor, boardFrameId(board))
 
   // agents
   snap.agents.forEach((a) => {
@@ -880,7 +923,13 @@ export function installZoomTracking(editor: Editor, onBoard?: (board: BoardName)
     if (editor.getCameraState() !== 'idle') return
     write(zoom)
     if (!onBoard) return
-    const board = boardAtPoint(editor, { x: viewport.x + viewport.w / 2, y: viewport.y + viewport.h / 2 })
+    // zoomed far out the viewport centre lands in the gutter between two boards, so fall back
+    // to the board with the largest visible area (B.S6 item 14)
+    const boxes = presentBoards(editor).flatMap((name) => {
+      const f = getFrame(editor, boardFrameId(name))
+      return f ? [{ name, box: { x: f.x, y: f.y, w: f.props.w, h: f.props.h } }] : []
+    })
+    const board = boardForViewport(boxes, { x: viewport.x, y: viewport.y, w: viewport.w, h: viewport.h })
     if (board) onBoard(board)
   })
 }

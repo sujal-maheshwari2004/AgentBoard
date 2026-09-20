@@ -4,6 +4,8 @@ import ReactDOM from 'react-dom/client'
 // (panels.css and the shape sheets come in through <App>).
 import 'tldraw/tldraw.css'
 import './styles/tokens.css'
+// motion primitives (@property --wb-angle, @keyframes) before every sheet that consumes them
+import './styles/motion.css'
 import './styles/edges.css'
 import { App } from './app/App'
 

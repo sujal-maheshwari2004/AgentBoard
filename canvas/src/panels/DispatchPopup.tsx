@@ -1,6 +1,7 @@
 import { useState } from 'react'
 import { store, useStore } from '../state/store'
 import { getWiring } from '../sync/wire'
+import { useModalDialog } from './useModalDialog'
 
 /** `dispatch.request` → Approve/Reject with an optional note → `dispatch.reply`. */
 export function DispatchPopup() {
@@ -17,6 +18,8 @@ export function DispatchPopup() {
 function DispatchDialog(props: { requestId: string; nodeId: string; agentId: string; jobSpec: string; remaining: number }) {
   const [note, setNote] = useState('')
   const node = useStore((s) => s.nodes[props.nodeId])
+  // focus trap only: a dispatch is answered, not dismissed (B.S6 #9)
+  const dialogRef = useModalDialog<HTMLDivElement>()
   const reply = (approved: boolean) => {
     const w = getWiring()
     if (!w) return
@@ -27,7 +30,7 @@ function DispatchDialog(props: { requestId: string; nodeId: string; agentId: str
   }
   return (
     <div className="wb-modal-backdrop" onPointerDown={(e) => e.stopPropagation()}>
-      <div className="wb-modal" role="dialog" aria-label="Dispatch request">
+      <div className="wb-modal" role="dialog" aria-modal="true" aria-label="Dispatch request" tabIndex={-1} ref={dialogRef}>
         <h2>Dispatch {props.agentId}?</h2>
         <div className="meta">
           node <code>{props.nodeId}</code>

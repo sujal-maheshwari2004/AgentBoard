@@ -2,7 +2,7 @@
  * `agent-card` chrome (plan B.7). 260x132, five rows, and the same conic ring the plan node uses:
  * 1.5s while working, 4.5s while blocked — one mechanism, two meanings (B.1 item 3).
  *
- * `@property --wb-angle` and `@keyframes wb-rotate` are declared once in PlanNodeUtil.css.
+ * `@property --wb-angle` and `@keyframes wb-rotate` are declared once in styles/motion.css.
  */
 
 .wb-agent {
@@ -204,5 +204,9 @@
   .wb-agent.running::after,
   .wb-agent.waiting::after {
     animation: none;
+  }
+  /* the progress rail grows in one step rather than sliding */
+  .wb-agent-rail-fill {
+    transition: none;
   }
 }

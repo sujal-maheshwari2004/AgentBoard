@@ -27,6 +27,18 @@
   --wb-lld: oklch(68% .18 310);  --wb-lld-hex: #b06fd8;
   --wb-er:  oklch(68% .18 145);  --wb-er-hex:  #34a06a;
   --wb-selection:     #0072f5;
+  /* ink that sits ON a filled accent (buttons, badges) and ON a board hue (segments, folder
+     headers): the board hues invert between themes, so `--wb-on-hue` flips and `--wb-on-accent`
+     does not. `--wb-scrim` is the modal backdrop. */
+  --wb-on-accent:     #ffffff;
+  /* ink on a STATUS fill (amber / green / red / grey): those four are theme-invariant, so this
+     one is too — dark ink reads on all of them in both themes. */
+  --wb-on-status:     #171717;
+  --wb-on-hue:        #ffffff;
+  --wb-scrim:         rgba(0, 0, 0, .35);
+  /* island geometry shared between React and CSS (B.S6 item 4): the chat island writes its own
+     height here on every open/collapse and the inspector stacks on it, so the two cannot drift. */
+  --wb-chat-h:        420px;
   /* spacing / radii / shadow / type */
   --wb-s1:2px; --wb-s2:4px; --wb-s3:6px; --wb-s4:8px; --wb-s5:12px;
   --wb-s6:16px; --wb-s7:20px; --wb-s8:24px; --wb-s9:32px; --wb-s10:48px;
@@ -45,6 +57,9 @@
   --wb-hld: oklch(75% .12 265); --wb-hld-hex:#89aef2;
   --wb-lld: oklch(75% .12 310); --wb-lld-hex:#cb9ae2;
   --wb-er:  oklch(75% .12 145); --wb-er-hex:#6cbf92;
+  /* the dark board hues are lighter (Langfuse's inversion), so ink on a hue fill goes dark */
+  --wb-on-hue:#171717;
+  --wb-scrim: rgba(0,0,0,.55);
   --wb-shadow-1: 0 1px 2px rgba(0,0,0,.4); --wb-shadow-2: 0 4px 14px rgba(0,0,0,.5);
 }
 

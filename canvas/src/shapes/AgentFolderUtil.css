@@ -85,7 +85,7 @@
   font-weight: 600;
   letter-spacing: 0.02em;
   text-transform: uppercase;
-  color: #1b1b1b;
+  color: var(--wb-on-status);
   background: var(--wb-folder-hue);
 }
 

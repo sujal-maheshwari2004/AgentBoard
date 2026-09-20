@@ -8,11 +8,7 @@
  * Solid = settled, marching dashes = in flight (Temporal + React Flow's `dashdraw`).
  */
 
-@keyframes wb-dashdraw {
-  from {
-    stroke-dashoffset: 10;
-  }
-}
+/* `@keyframes wb-dashdraw` lives in styles/motion.css with the other motion primitives. */
 
 /* 2px zoom-compensated: `--wb-zoom` is written on the editor container at camera stop */
 .tl-shape[data-wb-edge] .tl-svg-container > g {
@@ -56,4 +52,19 @@
 .tl-shape[data-wb-edge][data-wb-cross] .tl-svg-container > g {
   stroke-width: calc(1.5px / var(--wb-zoom, 1));
   opacity: 0.4;
+}
+
+/*
+ * Edge labels. tldraw's own label type scale is built for hand-drawn diagrams and dwarfs our
+ * 14px node titles; B.1's type scale wins here (B.S6 polish). The label keeps tldraw's own
+ * background plate so it stays legible where it crosses a line.
+ */
+.tl-shape[data-wb-edge] .tl-text-label__inner {
+  /* tldraw writes the size inline from its own type scale, so this has to win */
+  font-size: var(--wb-t3) !important;
+  line-height: 1.4 !important;
+  min-height: 0 !important;
+  /* tldraw measured the box at ITS size; leave the width alone and just let the text breathe */
+  white-space: nowrap;
+  overflow: visible;
 }

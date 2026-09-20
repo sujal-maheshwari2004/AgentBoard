@@ -26,6 +26,7 @@ import { store, useStore } from '../state/store'
 import type { AgentStatus } from '../state/types'
 import { agentElapsed, agentStalled, formatCount, formatCost, formatElapsed, formatTokensCompact } from '../state/format'
 import { revealAgentFolder } from '../sync/apply'
+import { cameraAnimation } from '../sync/motion'
 import { nodeShapeId } from './ids'
 import {
   AGENT_CARD_H,
@@ -192,9 +193,12 @@ function AgentCardBody({ shape }: { shape: AgentCardShape }) {
           <div
             className="wb-agent-rail"
             role="progressbar"
+            aria-label={`${p.name} progress`}
             aria-valuemin={0}
             aria-valuemax={100}
             aria-valuenow={p.progress >= 0 ? Math.round(p.progress * 100) : undefined}
+            aria-valuetext={p.progress >= 0 ? `${Math.round(p.progress * 100)}%` : 'no progress reported'}
+            title={p.progress >= 0 ? `${Math.round(p.progress * 100)}% reported` : 'no progress reported'}
           >
             <span className="wb-agent-rail-fill" style={{ width: `${Math.max(0, p.progress) * 100}%` }} />
           </div>
@@ -211,6 +215,7 @@ function AgentCardBody({ shape }: { shape: AgentCardShape }) {
             type="button"
             className="wb-agent-btn"
             title={`Open the ${p.agentId} chat thread`}
+            aria-label={`Open the ${p.agentId} chat thread`}
             onPointerDown={stop}
             onClick={(e) => {
               e.stopPropagation()
@@ -225,6 +230,8 @@ function AgentCardBody({ shape }: { shape: AgentCardShape }) {
           <button
             type="button"
             className="wb-agent-btn"
+            title={`Open the ${p.agentId} folder (plan and diagram)`}
+            aria-label={`Open the ${p.agentId} folder`}
             onPointerDown={stop}
             onClick={(e) => {
               e.stopPropagation()
@@ -237,6 +244,8 @@ function AgentCardBody({ shape }: { shape: AgentCardShape }) {
             type="button"
             className="wb-agent-btn"
             disabled={!p.nodeId}
+            title={p.nodeId ? `Put the camera on ${p.nodeId}` : 'This agent has no assigned node'}
+            aria-label={p.nodeId ? `Focus the node ${p.nodeId}` : 'No assigned node to focus'}
             onPointerDown={stop}
             onClick={(e) => {
               e.stopPropagation()
@@ -256,5 +265,5 @@ function focusNode(editor: Editor, nodeId: string): void {
   const id = nodeShapeId(nodeId)
   if (!editor.getShape(id)) return
   editor.select(id)
-  editor.zoomToSelection({ animation: { duration: 250 } })
+  editor.zoomToSelection({ animation: cameraAnimation(250) })
 }

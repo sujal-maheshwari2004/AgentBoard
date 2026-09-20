@@ -10,7 +10,11 @@
 // Everything on screen comes from `store.threads`, which is fed by `chat.message` alone and
 // deduped by `id` — never from `event.append` (A.4). Collapsed, the island is a 44px pill
 // carrying the total unread count.
-import { useEffect, useMemo, useRef, useState } from 'react'
+//
+// B.S6: the message list is a `role="log"` live region, every bubble carries a visible Reply
+// button (not just a double-click), the tab strip has real scroll affordances past ~5 threads,
+// and the island publishes its own height as `--wb-chat-h` so the inspector can stack on it.
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import { store, useStore } from '../state/store'
 import type { ChatMessage } from '../state/types'
 import {
@@ -23,6 +27,10 @@ import {
   totalUnread,
 } from '../state/threads'
 import { getWiring } from '../sync/wire'
+import { CHAT_HEIGHT_VAR, chatHeightValue } from './islands'
+
+/** how far a tab-strip arrow scrolls per click */
+const TAB_SCROLL_STEP = 120
 
 export function ChatPanel() {
   const threads = useStore((s) => s.threads)
@@ -34,11 +42,18 @@ export function ChatPanel() {
   const [text, setText] = useState('')
   const [replyTo, setReplyTo] = useState<ChatMessage | null>(null)
   const listRef = useRef<HTMLDivElement | null>(null)
+  const tabsRef = useRef<HTMLDivElement | null>(null)
+  const [overflow, setOverflow] = useState({ left: false, right: false })
 
   const tabs = useMemo(() => deriveThreads(threads, unread, agents, activeThread), [threads, unread, agents, activeThread])
   const messages = threads[activeThread] ?? EMPTY
   const groups = useMemo(() => groupMessages(messages), [messages])
   const pending = totalUnread(unread)
+
+  // one source of truth for the island's height: the inspector stacks on `--wb-chat-h` (B.S6 #4)
+  useLayoutEffect(() => {
+    document.documentElement.style.setProperty(CHAT_HEIGHT_VAR, chatHeightValue(open))
+  }, [open])
 
   // a reply target only makes sense inside the thread it was picked in
   useEffect(() => setReplyTo(null), [activeThread])
@@ -46,6 +61,13 @@ export function ChatPanel() {
     const el = listRef.current
     if (el) el.scrollTop = el.scrollHeight
   }, [messages.length, activeThread, open])
+
+  const measureTabs = useCallback(() => {
+    const el = tabsRef.current
+    if (!el) return
+    setOverflow({ left: el.scrollLeft > 4, right: el.scrollLeft + el.clientWidth < el.scrollWidth - 4 })
+  }, [])
+  useEffect(measureTabs, [measureTabs, tabs.length, open])
 
   if (!open) {
     return (
@@ -72,28 +94,56 @@ export function ChatPanel() {
     setReplyTo(null)
   }
 
+  const scrollTabs = (delta: number) => {
+    tabsRef.current?.scrollBy({ left: delta, behavior: 'smooth' })
+  }
+
   return (
     <div className="wb-panel wb-chat" data-testid="chat-panel">
-      <div className="wb-chat-tabs" role="tablist" aria-label="Chat threads">
-        {tabs.map((t) => (
+      <div className="wb-chat-tabbar">
+        {overflow.left && (
           <button
-            key={t.thread}
             type="button"
-            role="tab"
-            aria-selected={t.thread === activeThread}
-            className={`wb-chat-tab${t.thread === activeThread ? ' active' : ''}`}
-            title={`${t.thread} — ${t.count} message(s)${t.unread ? `, ${t.unread} unread` : ''}${t.live ? ', live' : ''}`}
-            onClick={() => store.setActiveThread(t.thread)}
+            className="wb-chat-more left"
+            title="Scroll the thread tabs left"
+            aria-label="Scroll the thread tabs left"
+            onClick={() => scrollTabs(-TAB_SCROLL_STEP)}
           >
-            {t.label}
-            {t.unread > 0 && (
-              <span className="wb-chat-dot" aria-label={`${t.unread} unread`}>
-                {t.unread > 9 ? '9+' : t.unread}
-              </span>
-            )}
+            ‹
           </button>
-        ))}
-        <span className="wb-chat-spacer" />
+        )}
+        <div className="wb-chat-tabs" role="tablist" aria-label="Chat threads" ref={tabsRef} onScroll={measureTabs}>
+          {tabs.map((t) => (
+            <button
+              key={t.thread}
+              type="button"
+              role="tab"
+              aria-selected={t.thread === activeThread}
+              className={`wb-chat-tab${t.thread === activeThread ? ' active' : ''}`}
+              title={`${t.thread} — ${t.count} message(s)${t.unread ? `, ${t.unread} unread` : ''}${t.live ? ', live' : ''}`}
+              aria-label={`${t.thread} thread, ${t.count} message(s)${t.unread ? `, ${t.unread} unread` : ''}${t.live ? ', live' : ''}`}
+              onClick={() => store.setActiveThread(t.thread)}
+            >
+              {t.label}
+              {t.unread > 0 && (
+                <span className="wb-chat-dot" aria-hidden="true">
+                  {t.unread > 9 ? '9+' : t.unread}
+                </span>
+              )}
+            </button>
+          ))}
+        </div>
+        {overflow.right && (
+          <button
+            type="button"
+            className="wb-chat-more right"
+            title={`Scroll the thread tabs right (${tabs.length} threads)`}
+            aria-label={`Scroll the thread tabs right, ${tabs.length} threads in all`}
+            onClick={() => scrollTabs(TAB_SCROLL_STEP)}
+          >
+            ›
+          </button>
+        )}
         <button
           type="button"
           className="wb-chat-collapse"
@@ -105,7 +155,15 @@ export function ChatPanel() {
         </button>
       </div>
 
-      <div className="wb-chat-list" ref={listRef} data-testid="chat-list">
+      <div
+        className="wb-chat-list"
+        ref={listRef}
+        data-testid="chat-list"
+        role="log"
+        aria-live="polite"
+        aria-relevant="additions text"
+        aria-label={`Messages in the ${activeThread} thread`}
+      >
         {messages.length === 0 && (
           <p className="wb-chat-empty">
             {activeThread === ROOT_THREAD ? 'No messages yet — say something to the root session.' : `No messages with ${activeThread} yet.`}
@@ -123,8 +181,20 @@ export function ChatPanel() {
               return (
                 <div key={m.id} className="wb-chat-msg">
                   {stub && <div className="wb-chat-quote">{stub}</div>}
-                  <div className="wb-chat-bubble" onDoubleClick={() => setReplyTo(m)} title="double-click to reply">
-                    {m.text}
+                  <div className="wb-chat-bubble-row">
+                    <div className="wb-chat-bubble" onDoubleClick={() => setReplyTo(m)} title="Double-click to reply">
+                      {m.text}
+                    </div>
+                    {/* B.S6 item 6: reply was discoverable only by double-clicking */}
+                    <button
+                      type="button"
+                      className="wb-chat-reply"
+                      title={`Reply to ${m.from}`}
+                      aria-label={`Reply to ${m.from}: ${m.text.slice(0, 40)}`}
+                      onClick={() => setReplyTo(m)}
+                    >
+                      ↩
+                    </button>
                   </div>
                   <span className="wb-chat-ts" title={m.ts}>
                     {formatClock(m.ts)}
@@ -139,7 +209,7 @@ export function ChatPanel() {
       {replyTo && (
         <div className="wb-chat-replying">
           <span>{quotedStub(messages, replyTo.id, 40)}</span>
-          <button type="button" className="wb-chat-collapse" onClick={() => setReplyTo(null)} aria-label="Cancel reply">
+          <button type="button" className="wb-chat-collapse" onClick={() => setReplyTo(null)} aria-label="Cancel reply" title="Cancel reply">
             ✕
           </button>
         </div>
