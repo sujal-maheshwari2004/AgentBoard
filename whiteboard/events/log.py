@@ -21,11 +21,14 @@ from pydantic import ValidationError
 from whiteboard.files.jsonl import JsonlTailer, append_jsonl
 from whiteboard.plan.model import Event
 
-__all__ = ["EventLog", "now_iso"]
+__all__ = ["ALL_EVENTS_LIMIT", "EventLog", "now_iso"]
 
 log = logging.getLogger(__name__)
 
 PROMPT_KINDS: tuple[str, ...] = ("text", "choice", "confirm")
+
+#: "every event" for the whole-log scans (``unresolved``).
+ALL_EVENTS_LIMIT = 1_000_000
 
 
 def now_iso() -> str:
@@ -165,6 +168,30 @@ class EventLog:
                 known.add(ev.seq)
                 new.append(ev)
         return new
+
+    def unresolved(self, proposed: str, settled: tuple[str, ...] | str) -> list[Event]:
+        """``proposed`` events whose ``request_id`` no ``settled`` event answers.
+
+        The audit trail of a request/decision pair (``dispatch_proposed`` vs
+        ``dispatch_approved``/``dispatch_rejected``, ``diagram_proposed`` vs
+        ``diagram_approved``/``diagram_rejected``) is the log itself, so what is
+        still pending after a restart is derived from it. Oldest first; the
+        latest proposal wins when a request id was proposed more than once.
+        """
+        self._ensure_loaded()
+        if isinstance(settled, str):
+            settled = (settled,)
+        open_: dict[str, Event] = {}
+        done: set[str] = set()
+        for ev in self.read_since(0, limit=ALL_EVENTS_LIMIT):
+            rid = ev.data.get("request_id") if isinstance(ev.data, dict) else None
+            if not isinstance(rid, str) or not rid:
+                continue
+            if ev.type == proposed:
+                open_[rid] = ev
+            elif ev.type in settled:
+                done.add(rid)
+        return sorted((ev for rid, ev in open_.items() if rid not in done), key=lambda e: e.seq)
 
     # -- subscribers ---------------------------------------------------------
     def subscribe(self) -> asyncio.Queue[Event]:
