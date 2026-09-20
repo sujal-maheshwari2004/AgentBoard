@@ -7,6 +7,7 @@ EXPECTED_FILES = [
     ".whiteboard/PLAN.md",
     ".whiteboard/COLLABORATION.md",
     ".whiteboard/plan/hld.md",
+    ".whiteboard/plan/lld.md",
     ".whiteboard/plan/er.md",
     ".whiteboard/plan/nodes/.gitkeep",
     ".whiteboard/agents/.gitkeep",
@@ -37,6 +38,9 @@ def test_fresh_scaffold_creates_everything(tmp_path: Path) -> None:
     assert "regenerated" in (tmp_path / ".whiteboard/PLAN.md").read_text()
     hld = (tmp_path / ".whiteboard/plan/hld.md").read_text()
     assert "```mermaid" in hld and "flowchart TD" in hld and "%% add nodes" in hld
+    lld = (tmp_path / ".whiteboard/plan/lld.md").read_text()
+    assert lld.startswith("# LLD")
+    assert "```mermaid" in lld and "flowchart TD" in lld and "%% add nodes" in lld
     assert (tmp_path / ".whiteboard/plan/er.md").read_text().startswith("# ER")
 
     task = (tmp_path / ".claude/agents/whiteboard-task.md").read_text()

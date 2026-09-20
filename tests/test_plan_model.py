@@ -4,7 +4,10 @@ import pytest
 from pydantic import ValidationError
 
 from whiteboard.plan.model import (
+    AGENT_FRONTMATTER_KEYS,
+    LIVE_AGENT_FIELDS,
     AgentCard,
+    AgentDiagram,
     Diagram,
     Edge,
     Event,
@@ -13,6 +16,7 @@ from whiteboard.plan.model import (
     Skeleton,
     interface_text,
     node_ready,
+    parse_agent_diagram,
     slugify,
     validate_agent_id,
     validate_node_id,
@@ -155,6 +159,70 @@ def test_agent_card_from_frontmatter_round_trip():
     assert fm == meta
     a2 = AgentCard.from_frontmatter({"id": "agent-z", "status": None, "assigned_node": "null"}, "")
     assert a2.status == "idle" and a2.assigned_node is None
+
+
+MERMAID_MD = (
+    "# Diagrams: agent-parser\n\n```mermaid\nflowchart LR\n"
+    "    Lexer[Lexer] -->|tokens| Parser[Parser]\n    Parser --> Ast\n```\n"
+)
+
+
+def test_parse_agent_diagram():
+    assert parse_agent_diagram(None) is None
+    assert parse_agent_diagram("") is None
+    assert parse_agent_diagram("# Diagrams\n\nNo fence here yet.\n") is None
+
+    d = parse_agent_diagram(MERMAID_MD)
+    assert isinstance(d, AgentDiagram) and d.error is None and d.direction == "LR"
+    # box ids are free-form here: these are components, not plan node ids
+    assert d.nodes == [
+        {"id": "Lexer", "label": "Lexer"}, {"id": "Parser", "label": "Parser"}, {"id": "Ast", "label": "Ast"},
+    ]
+    assert d.edges == [
+        {"src": "Lexer", "dst": "Parser", "label": "tokens"}, {"src": "Parser", "dst": "Ast", "label": None},
+    ]
+    assert d.mermaid.startswith("flowchart LR\n")
+
+    # a broken fence is captured, never raised
+    broken = parse_agent_diagram("```mermaid\nflowchart TD\n    A[[[\n```\n")
+    assert broken is not None and broken.error and "line 2" in broken.error
+    assert broken.nodes == [] and broken.mermaid == "flowchart TD\n    A[[[\n"
+
+
+def test_agent_card_diagram_derived_and_round_trips():
+    card = AgentCard(id="agent-parser", assigned_node="node-parser", diagrams_md=MERMAID_MD)
+    assert card.diagram is not None and [n["id"] for n in card.diagram.nodes] == ["Lexer", "Parser", "Ast"]
+    # derived, not stored: it is absent from the frontmatter and a supplied
+    # value is ignored in favour of what diagrams_md actually says
+    assert "diagram" not in card.frontmatter()
+    forced = AgentCard(id="agent-parser", diagrams_md=MERMAID_MD, diagram={"mermaid": "lies", "nodes": []})
+    assert forced.diagram == card.diagram
+    assert AgentCard(id="agent-parser").diagram is None
+    dumped = card.model_dump(mode="json")
+    assert dumped["diagram"]["edges"][0] == {"src": "Lexer", "dst": "Parser", "label": "tokens"}
+    assert AgentCard.model_validate(dumped) == card
+    assert json.dumps(dumped)
+
+
+def test_agent_card_live_fields_written_only_when_set():
+    assert len(AGENT_FRONTMATTER_KEYS) == 11
+    assert AGENT_FRONTMATTER_KEYS[6:] == LIVE_AGENT_FIELDS
+    bare = AgentCard(id="agent-a", assigned_node="node-a")
+    assert list(bare.frontmatter()) == list(AGENT_FRONTMATTER_KEYS[:6])
+    live = AgentCard(
+        id="agent-a", assigned_node="node-a", activity="running tests", progress=1.7,
+        heartbeat_at="2026-09-20T00:00:01Z", finished_at=None,
+        metrics={"tool_calls": 4, "files_touched": ["a.py", "a.py", "b.py"]},
+    )
+    assert live.progress == 1.0  # clamped
+    assert live.metrics["files_touched"] == ["a.py", "b.py"]
+    fm = live.frontmatter()
+    assert list(fm) == [*AGENT_FRONTMATTER_KEYS[:6], "activity", "progress", "heartbeat_at", "metrics"]
+    assert "finished_at" not in fm
+    assert AgentCard.from_frontmatter(fm, "notes\n") == live.model_copy(update={"notes": "notes\n"})
+    assert AgentCard(id="agent-a", progress=-3).progress == 0.0
+    capped = AgentCard(id="agent-a", metrics={"files_touched": [f"f{i}.py" for i in range(500)]})
+    assert len(capped.metrics["files_touched"]) == 200
 
 
 # -- Event / Skeleton / Diagram / PlanSnapshot ----------------------------------

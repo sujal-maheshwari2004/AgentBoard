@@ -93,6 +93,17 @@ def render_job_spec(
         "",
         _bullets(dependent_lines, "- (none)") if dependent_lines else "- (none)",
         "",
+        "## Diagrams you must produce",
+        "",
+        f"- Before you report `done`, refresh the LLD for `{node.id}`: "
+        "`mcp__whiteboard__write_agent_diagram(agent_id=<your agent id>, mermaid=...)`.",
+        "- One box per module, class or table you actually built; box ids there are free-form "
+        "(they are your components, not plan node ids).",
+        "- If the design deviates from this spec, rewrite it with "
+        "`mcp__whiteboard__write_agent_plan(agent_id=<your agent id>, plan_md=...)` so the canvas shows the truth.",
+        "- Report at every milestone: "
+        "`mcp__whiteboard__report_progress(agent_id=<your agent id>, activity=..., progress=0.0-1.0)`.",
+        "",
         "## Scope rules",
         "",
         "- Only touch paths relevant to this node.",
@@ -110,8 +121,14 @@ def render_job_spec(
     return "\n".join(sections)
 
 
-def render_plan_md(nodes: dict[str, Node], agents: dict[str, AgentCard], diagram_mermaid: str) -> str:
-    """`PLAN.md`: overview tables, the full flowchart and one section per node."""
+def render_plan_md(
+    nodes: dict[str, Node],
+    agents: dict[str, AgentCard],
+    diagram_mermaid: str,
+    boards: dict[str, str] | None = None,
+) -> str:
+    """`PLAN.md`: overview tables, the full flowchart, one section per board
+    (`boards` maps a board name to its mermaid) and one section per node."""
     lines: list[str] = ["# PLAN", "", PLAN_MD_NOTICE, "", "## Nodes", ""]
     lines += ["| id | title | type | status | owner | depends_on |", "|---|---|---|---|---|---|"]
     for n in nodes.values():
@@ -152,6 +169,20 @@ def render_plan_md(nodes: dict[str, Node], agents: dict[str, AgentCard], diagram
 
     mermaid = (diagram_mermaid or "").strip("\n")
     lines += ["", "## Flowchart", "", "```mermaid", mermaid if mermaid else "flowchart TD", "```", ""]
+
+    lines += ["## Boards", ""]
+    for name, board_mermaid in (boards or {}).items():
+        text = (board_mermaid or "").strip("\n")
+        lines += [
+            f"### {name.upper()} (`plan/{name}.md`)",
+            "",
+            "```mermaid",
+            text if text else "flowchart TD",
+            "```",
+            "",
+        ]
+    if not boards:
+        lines += ["(no boards)", ""]
 
     lines += ["## Node details", ""]
     for n in nodes.values():

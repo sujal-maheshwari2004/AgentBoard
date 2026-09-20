@@ -7,7 +7,7 @@ from whiteboard.files.atomic import SelfWriteRegistry
 from whiteboard.files.frontmatter import split_frontmatter
 from whiteboard.mermaid import extract_mermaid_blocks, parse
 from whiteboard.plan.model import AgentCard, PlanSnapshot, Skeleton
-from whiteboard.plan.store import OpsResult, PlanStore
+from whiteboard.plan.store import CARD_WRITE_INTERVAL_S, OpsResult, PlanStore
 from whiteboard.scaffold import scaffold
 
 
@@ -38,7 +38,11 @@ def _wb(root: Path) -> Path:
 
 
 def _hld_inner(root: Path) -> str:
-    return extract_mermaid_blocks((_wb(root) / "plan" / "hld.md").read_text())[0][2]
+    return _inner(root, "hld")
+
+
+def _inner(root: Path, name: str) -> str:
+    return extract_mermaid_blocks((_wb(root) / "plan" / f"{name}.md").read_text())[0][2]
 
 
 def _types(msgs: list[dict]) -> list[str]:
@@ -53,13 +57,14 @@ def test_load_empty_scaffold(root: Path) -> None:
     snap = store.load()
     assert isinstance(snap, PlanSnapshot)
     assert snap.project == root.name and snap.nodes == [] and snap.agents == [] and snap.edges == []
-    assert [d.name for d in snap.diagrams] == ["er", "hld"] or [d.name for d in snap.diagrams] == ["hld", "er"]
-    assert list(store.diagrams) == ["hld", "er"]
-    assert snap.layout.keys() == {"hld", "er"}
+    assert {d.name for d in snap.diagrams} == {"hld", "lld", "er"}
+    assert list(store.diagrams) == ["hld", "lld", "er"]
+    assert snap.layout.keys() == {"hld", "lld", "er"}
     # PLAN.md replaced the template placeholder; the diagrams were left alone.
     plan_md = (_wb(root) / "PLAN.md").read_text()
     assert plan_md.startswith("# PLAN") and "(no nodes yet)" in plan_md
     assert "%% add nodes" in (_wb(root) / "plan" / "hld.md").read_text()
+    assert "%% add nodes" in (_wb(root) / "plan" / "lld.md").read_text()
     assert store.cache_path.exists()
     assert store.invalid == {}
 
@@ -103,14 +108,18 @@ def test_upsert_nodes_regenerates_hld_and_plan_md(root: Path, chain: PlanStore) 
         "    %% add nodes\n"
         "    node-a[A thing]\n"
         "    node-b[B thing]\n"
-        '    node-c["C [x]"]\n'
         "    node-a --> node-b\n"
-        "    node-a --> node-c\n"
-        "    node-b --> node-c\n"
+    )
+    # node-c is type lld: it is homed on the LLD board, not on HLD.
+    assert _inner(root, "lld") == (
+        "flowchart TD\n"
+        "    %% add nodes\n"
+        '    node-c["C [x]"]\n'
     )
     plan_md = (_wb(root) / "PLAN.md").read_text()
     assert "| `node-c` | C [x] | lld | todo | — | `node-a`, `node-b` |" in plan_md
-    assert "node-b --> node-c" in plan_md
+    assert "node-b --> node-c" in plan_md  # the full flowchart carries every edge
+    assert "### LLD (`plan/lld.md`)" in plan_md and "### HLD (`plan/hld.md`)" in plan_md
     assert chain.rev == 4  # load wrote PLAN.md once, then three upserts
 
 
@@ -130,11 +139,15 @@ def test_second_load_is_a_noop(root: Path, chain: PlanStore) -> None:
 
 
 def test_load_unions_diagram_edges_and_frontmatter_deps(root: Path, chain: PlanStore) -> None:
-    # While the server was down: the diagram lost the a->b line and gained a new
-    # box node-d (c --> node-d); node-b's frontmatter gained a dep on node-c.
+    # While the server was down: the diagram lost the a->b line, node-c was
+    # drawn on hld too and a new box node-d appeared (c --> node-d); node-b's
+    # frontmatter gained a dep on node-c.
     hld = _wb(root) / "plan" / "hld.md"
-    text = hld.read_text().replace("    node-a --> node-b\n", "").replace("```\n\n", "")
-    hld.write_text(text.replace("    node-b --> node-c\n", "    node-b --> node-c\n    node-c --> node-d[D thing]\n"))
+    text = hld.read_text().replace("    node-a --> node-b\n", "")
+    hld.write_text(text.replace(
+        "    node-b[B thing]\n",
+        '    node-b[B thing]\n    node-c["C [x]"]\n    node-b --> node-c\n    node-c --> node-d[D thing]\n',
+    ))
     node_b = _wb(root) / "plan" / "nodes" / "node-b.md"
     node_b.write_text(node_b.read_text().replace("depends_on:\n- node-a\n", "depends_on:\n- node-a\n- node-c\n"))
 
@@ -189,8 +202,11 @@ def test_snapshot_and_skeleton(chain: PlanStore) -> None:
     assert [n.id for n in snap.nodes] == ["node-a", "node-b", "node-c"]
     hld = next(d for d in snap.diagrams if d.name == "hld")
     assert hld.direction == "TD" and hld.path == ".whiteboard/plan/hld.md"
-    assert [(e.src, e.dst) for e in hld.edges] == [("node-a", "node-b"), ("node-a", "node-c"), ("node-b", "node-c")]
+    assert [(e.src, e.dst) for e in hld.edges] == [("node-a", "node-b")]
     assert hld.mermaid.startswith("flowchart TD\n")
+    lld = next(d for d in snap.diagrams if d.name == "lld")
+    assert lld.path == ".whiteboard/plan/lld.md" and lld.edges == []
+    assert "node-c" in lld.mermaid
     skel = chain.skeleton()
     assert isinstance(skel, Skeleton)
     assert skel.nodes[2] == {"id": "node-c", "title": "C [x]", "type": "lld", "status": "todo", "depends_on": ["node-a", "node-b"]}
@@ -248,6 +264,16 @@ def test_upsert_node_into_er_diagram(root: Path, chain: PlanStore) -> None:
     assert next(e for e in snap.edges if e.dst == "node-orders").diagram == "er"
 
 
+def test_upsert_node_into_lld_diagram(root: Path, chain: PlanStore) -> None:
+    chain.upsert_node("node-cache", title="Cache", type="lld")
+    chain.upsert_node("node-queue", title="Queue", type="lld", depends_on=["node-cache"], diagram="lld")
+    lld = _inner(root, "lld")
+    assert "node-cache[Cache]" in lld and "node-cache --> node-queue" in lld
+    assert "node-cache" not in _hld_inner(root)
+    snap = chain.snapshot()
+    assert next(e for e in snap.edges if e.dst == "node-queue").diagram == "lld"
+
+
 def test_set_node_status_and_owner(chain: PlanStore) -> None:
     node = chain.set_node_status("node-a", "done", owner="agent-a")
     assert node.status == "done" and node.owner == "agent-a"
@@ -265,7 +291,7 @@ def test_delete_node_cascades(root: Path, chain: PlanStore) -> None:
     assert not (_wb(root) / "plan" / "nodes" / "node-a.md").exists()
     assert chain.get_node("node-b").depends_on == [] and chain.get_node("node-c").depends_on == ["node-b"]
     inner = _hld_inner(root)
-    assert "node-a" not in inner and "node-b --> node-c" in inner
+    assert "node-a" not in inner and "node-b[B thing]" in inner
     assert "node-a" not in (_wb(root) / "PLAN.md").read_text()
     layout = json.loads((_wb(root) / "plan" / "hld.layout.json").read_text())
     assert layout["nodes"] == {} and layout["edges"] == {}
@@ -300,15 +326,18 @@ def test_node_created_and_status_changed_are_cosmetic(root: Path, chain: PlanSto
         {"kind": "node-created", "id": "node-d", "label": "D thing", "diagram": "hld"},
         {"type": "status-changed", "id": "node-a", "status": "in_progress"},
         {"op": "node-created", "label": "Ledger table", "diagram": "er"},
+        {"op": "node-created", "label": "Cache layer", "diagram": "lld"},
     ])
     assert result.ok, result.error
     assert chain.get_node("node-d").title == "D thing" and chain.get_node("node-d").type == "hld"
     assert chain.get_node("node-a").status == "in_progress"
     assert chain.get_node("node-ledger-table").type == "er"
+    assert chain.get_node("node-cache-layer").type == "lld"
     assert (_wb(root) / "plan" / "nodes" / "node-d.md").exists()
     assert "node-d[D thing]" in _hld_inner(root)
-    assert "node-ledger-table[Ledger table]" in extract_mermaid_blocks((_wb(root) / "plan" / "er.md").read_text())[0][2]
-    assert _types(result.messages) == ["plan.node.upsert"] * 3
+    assert "node-ledger-table[Ledger table]" in _inner(root, "er")
+    assert "node-cache-layer[Cache layer]" in _inner(root, "lld")
+    assert _types(result.messages) == ["plan.node.upsert"] * 4
 
 
 def test_apply_ops_errors_write_nothing(root: Path, chain: PlanStore) -> None:
@@ -336,14 +365,14 @@ def test_apply_ops_errors_write_nothing(root: Path, chain: PlanStore) -> None:
 def test_risky_edge_op_parks_then_commits(root: Path, chain: PlanStore) -> None:
     chain.upsert_node("node-d", title="D thing")
     rev = chain.rev
-    result = chain.apply_ops([{"op": "edge-created", "from": "node-c", "to": "node-d", "diagram": "hld"}])
+    result = chain.apply_ops([{"op": "edge-created", "from": "node-b", "to": "node-d", "diagram": "hld"}])
     assert isinstance(result, OpsResult)
     assert result.ok is False and result.risky is True and result.request_id
-    assert result.summary == "node-d: depends_on +node-c"
+    assert result.summary == "node-d: depends_on +node-b"
     assert result.affected == ["node-d"]
-    assert "--- a/.whiteboard/plan/nodes/node-d.md" in result.diff and "+- node-c" in result.diff
+    assert "--- a/.whiteboard/plan/nodes/node-d.md" in result.diff and "+- node-b" in result.diff
     assert chain.get_node("node-d").depends_on == [] and chain.rev == rev
-    assert "node-c --> node-d" not in _hld_inner(root)
+    assert "node-b --> node-d" not in _hld_inner(root)
     assert set(chain.pending_edits) == {result.request_id}
 
     committed = chain.resolve_pending(result.request_id, True, "because")
@@ -351,12 +380,29 @@ def test_risky_edge_op_parks_then_commits(root: Path, chain: PlanStore) -> None:
     assert _types(committed.messages) == ["plan.node.upsert", "plan.edge.upsert"]
     assert committed.messages[1] == {
         "type": "plan.edge.upsert",
-        "payload": {"edge": {"src": "node-c", "dst": "node-d", "label": None, "diagram": "hld"}},
+        "payload": {"edge": {"src": "node-b", "dst": "node-d", "label": None, "diagram": "hld"}},
     }
-    assert chain.get_node("node-d").depends_on == ["node-c"]
-    assert "node-c --> node-d" in _hld_inner(root)
-    assert "- node-c" in (_wb(root) / "plan" / "nodes" / "node-d.md").read_text()
+    assert chain.get_node("node-d").depends_on == ["node-b"]
+    assert "node-b --> node-d" in _hld_inner(root)
+    assert "- node-b" in (_wb(root) / "plan" / "nodes" / "node-d.md").read_text()
     assert chain.rev == rev + 1 and chain.pending_edits == {}
+
+
+def test_cross_board_edge_attribution(root: Path, chain: PlanStore) -> None:
+    """node-c (lld) -> node-d (hld) is drawn on neither board; it is attributed
+    to the home board of its source and lives in the frontmatter."""
+    chain.upsert_node("node-d", title="D thing")
+    result = chain.apply_ops(
+        [{"op": "edge-created", "from": "node-c", "to": "node-d"}], request_id="pre-approved"
+    )
+    assert result.ok
+    edge = next(m for m in result.messages if m["type"] == "plan.edge.upsert")
+    assert edge["payload"]["edge"] == {"src": "node-c", "dst": "node-d", "label": None, "diagram": "lld"}
+    assert "node-c --> node-d" not in _hld_inner(root)
+    assert "node-c --> node-d" not in _inner(root, "lld")
+    assert "- node-c" in (_wb(root) / "plan" / "nodes" / "node-d.md").read_text()
+    snap = chain.snapshot()
+    assert next(e for e in snap.edges if e.dst == "node-d").diagram == "lld"
 
 
 def test_risky_op_rejected_returns_revert(chain: PlanStore) -> None:
@@ -417,11 +463,11 @@ def test_write_diagram_round_trip(root: Path, chain: PlanStore) -> None:
     assert diagram.name == "hld" and diagram.direction == "LR"
     # The returned Diagram is the regenerated one: node-c (not drawn) is re-added with its edges.
     assert [(e.src, e.dst, e.label) for e in diagram.edges] == [
-        ("node-a", "node-d", None), ("node-d", "node-b", "feeds"), ("node-a", "node-c", None), ("node-b", "node-c", None),
+        ("node-a", "node-d", None), ("node-d", "node-b", "feeds"),
     ]
     assert chain.get_node("node-d").title == "Brand new" and chain.get_node("node-d").depends_on == ["node-a"]
     assert chain.get_node("node-b").depends_on == ["node-d"]  # a->b removed by the diagram edit
-    # node-c was not in the new diagram but still exists: it is re-added with its edges.
+    # node-c is homed on lld, so rewriting hld does not pull it back in.
     inner = _hld_inner(root)
     assert inner == (
         "flowchart LR\n"
@@ -429,12 +475,10 @@ def test_write_diagram_round_trip(root: Path, chain: PlanStore) -> None:
         "    node-a[A thing]\n"
         "    node-b[B thing]\n"
         "    node-d[Brand new]\n"
-        '    node-c["C [x]"]\n'
         "    node-a --> node-d\n"
         "    node-d -->|feeds| node-b\n"
-        "    node-a --> node-c\n"
-        "    node-b --> node-c\n"
     )
+    assert 'node-c["C [x]"]' in _inner(root, "lld")
     assert (_wb(root) / "plan" / "hld.md").read_text().startswith("# HLD\n")
     again = chain.write_diagram("hld", inner)
     assert again.mermaid == inner
@@ -466,7 +510,7 @@ def test_write_new_diagram_file(root: Path, chain: PlanStore) -> None:
     assert diagram.path == ".whiteboard/plan/api.md"
     assert chain.get_node("node-api").type == "hld" and chain.get_node("node-api").depends_on == ["node-a"]
     assert "node-api[API layer]" in _hld_inner(root)  # home diagram gets it too
-    assert chain.snapshot().layout.keys() == {"hld", "er", "api"}
+    assert chain.snapshot().layout.keys() == {"hld", "lld", "er", "api"}
     assert chain.get_diagram("api") is not None and chain.get_diagram("nope") is None
 
 
@@ -483,7 +527,12 @@ def test_upsert_agent_creates_folder(root: Path, chain: PlanStore) -> None:
     )
     assert (folder / "plan.md").read_text().startswith("# Job spec: node-b")
     assert "node-example" not in (folder / "plan.md").read_text()
-    assert (folder / "diagrams.md").read_text().startswith("# Diagrams: agent-b")
+    diagrams_md = (folder / "diagrams.md").read_text()
+    assert diagrams_md.startswith("# Diagrams: agent-b")
+    assert extract_mermaid_blocks(diagrams_md)[0][2] == (
+        "flowchart TD\n    %% components of node-b; box ids are free-form\n"
+    )
+    assert card.diagram is not None and card.diagram.nodes == []
     assert "| `agent-b` | `node-b` | idle | — |" in (_wb(root) / "PLAN.md").read_text()
     assert chain.last_messages == [{"type": "agent.card.upsert", "payload": {"agent": card.model_dump(mode="json")}}]
 
@@ -545,6 +594,114 @@ def test_delete_agent(root: Path, chain: PlanStore) -> None:
     assert not (_wb(root) / "agents" / "agent-b").exists()
     assert chain.get_agent("agent-b") is None
     assert chain.last_messages == [{"type": "agent.card.delete", "payload": {"id": "agent-b"}}]
+
+
+def test_write_agent_diagram(root: Path, chain: PlanStore) -> None:
+    chain.upsert_agent("agent-b", "node-b")
+    mermaid = "flowchart LR\n    Lexer[Lexer] -->|tokens| Parser[Parser]\n"
+    card = chain.write_agent_diagram("agent-b", mermaid)
+    path = _wb(root) / "agents" / "agent-b" / "diagrams.md"
+    assert path.read_text().startswith("# Diagrams: agent-b")
+    assert extract_mermaid_blocks(path.read_text())[0][2] == mermaid
+    # free-form box ids are fine here and no plan node was created
+    assert card.diagram is not None and card.diagram.direction == "LR"
+    assert [n["id"] for n in card.diagram.nodes] == ["Lexer", "Parser"]
+    assert card.diagram.edges == [{"src": "Lexer", "dst": "Parser", "label": "tokens"}]
+    assert chain.get_node("node-lexer") is None and "Lexer" not in _hld_inner(root)
+    assert chain.last_messages[0]["payload"]["agent"]["diagram"]["direction"] == "LR"
+
+    # a second write replaces the same fence; the prose around it survives
+    chain.upsert_agent("agent-b", None, diagrams_md="# D\n\nprose\n\n```mermaid\nflowchart TD\n    A\n```\n")
+    again = chain.write_agent_diagram("agent-b", "flowchart TD\n    B[Two]\n")
+    assert again.diagrams_md == "# D\n\nprose\n\n```mermaid\nflowchart TD\n    B[Two]\n```\n"
+    # a file with no fence at all gets one appended
+    chain.upsert_agent("agent-b", None, diagrams_md="# D\n\njust prose\n")
+    appended = chain.write_agent_diagram("agent-b", "flowchart TD\n    C\n")
+    assert appended.diagrams_md.endswith("```mermaid\nflowchart TD\n    C\n```\n")
+
+    with pytest.raises(ValueError, match="invalid mermaid"):
+        chain.write_agent_diagram("agent-b", "flowchart TD\n    A[[[\n")
+    with pytest.raises(ValueError, match="unknown agent"):
+        chain.write_agent_diagram("agent-zzz", "flowchart TD\n")
+
+
+def test_upsert_agent_keeps_live_fields(chain: PlanStore) -> None:
+    chain.upsert_agent("agent-b", "node-b")
+    chain.touch_agent("agent-b", activity="reading", progress=0.25, metrics={"tool_calls": 2})
+    card = chain.upsert_agent("agent-b", None, plan_md="# rewritten\n")
+    assert card.plan_md == "# rewritten\n"
+    assert card.activity == "reading" and card.progress == 0.25
+    assert card.metrics == {"tool_calls": 2} and card.heartbeat_at
+
+
+def test_touch_agent_is_lightweight(root: Path, chain: PlanStore) -> None:
+    chain.upsert_agent("agent-b", "node-b")
+    card_path = _wb(root) / "agents" / "agent-b" / "card.md"
+    plan_md_before = (_wb(root) / "PLAN.md").read_text()
+    cache_before = (_wb(root) / ".cache" / "last_good.json").read_text()
+    rev, writes = chain.rev, chain.writes
+
+    # the card was just committed, so the first heartbeat is throttled
+    first = chain.touch_agent("agent-b", activity="reading node-b")
+    assert first.activity == "reading node-b" and first.heartbeat_at
+    assert chain.writes == writes and chain._dirty_cards == {"agent-b"}
+    assert chain.last_messages == [{"type": "agent.card.upsert", "payload": {"agent": first.model_dump(mode="json")}}]
+
+    # pretend the last write was long ago: exactly one card.md write
+    chain._card_written_at["agent-b"] = chain._card_written_at["agent-b"] - CARD_WRITE_INTERVAL_S - 1
+    chain.touch_agent("agent-b", activity="writing tests", progress=0.5, metrics={"tool_calls": 3})
+    assert chain.writes == writes + 1 and chain._dirty_cards == set()
+    assert "activity: writing tests" in card_path.read_text()
+
+    # and the next ones are throttled again
+    merged = chain.touch_agent(
+        "agent-b", metrics={"tokens_in": 10}, files_touched=["a.py", "a.py"], progress=3.0
+    )
+    chain.touch_agent("agent-b", files_touched=["a.py", "b.py"])
+    assert chain.writes == writes + 1
+    assert merged.progress == 1.0  # clamped
+    final = chain.get_agent("agent-b")
+    assert final.metrics == {"tool_calls": 3, "tokens_in": 10, "files_touched": ["a.py", "b.py"]}
+    assert final.activity == "writing tests"  # not reset by a metrics-only beat
+
+    # nothing heavy happened: no rev bump, no PLAN.md regen, no cache write
+    assert chain.rev == rev
+    assert (_wb(root) / "PLAN.md").read_text() == plan_md_before
+    assert (_wb(root) / ".cache" / "last_good.json").read_text() == cache_before
+
+    assert chain.flush_dirty_cards() == []  # still inside the interval
+    assert chain.flush_dirty_cards(force=True) == ["agent-b"]
+    assert chain.flush_dirty_cards(force=True) == []  # nothing dirty any more
+    assert chain.rev == rev
+
+    finished = chain.touch_agent("agent-b", activity="done", finished=True)
+    assert finished.finished_at == finished.heartbeat_at
+    chain.flush_dirty_cards(force=True)
+
+    fresh = PlanStore(root)
+    fresh.load()
+    assert fresh.get_agent("agent-b") == chain.get_agent("agent-b")
+    with pytest.raises(ValueError, match="unknown agent"):
+        chain.touch_agent("agent-zzz")
+
+
+def test_finalize_agent_full_commit(root: Path, chain: PlanStore) -> None:
+    chain.upsert_agent("agent-b", "node-b")
+    chain.touch_agent("agent-b", activity="wrapping up", metrics={"tool_calls": 7})
+    rev = chain.rev
+    card = chain.finalize_agent("agent-b", tokens_in=100, tokens_out=20, cost_usd=0.5, duration_s=42.0)
+    assert card.finished_at and card.heartbeat_at == card.finished_at
+    assert card.metrics == {"tool_calls": 7, "tokens_in": 100, "tokens_out": 20, "cost_usd": 0.5, "elapsed_s": 42.0}
+    assert chain.rev == rev + 1  # exactly one bump
+    assert chain._dirty_cards == set()
+    text = (_wb(root) / "agents" / "agent-b" / "card.md").read_text()
+    assert "finished_at:" in text and "tokens_in: 100" in text
+    assert chain.last_messages == [{"type": "agent.card.upsert", "payload": {"agent": card.model_dump(mode="json")}}]
+    fresh = PlanStore(root)
+    fresh.load()
+    assert fresh.get_agent("agent-b") == card
+    with pytest.raises(ValueError, match="unknown agent"):
+        chain.finalize_agent("agent-zzz")
 
 
 # ---------------------------------------------------------------- layout

@@ -247,7 +247,7 @@ def ingest_paste(ctx: ServerContext, text: str) -> tuple[str, dict]:
                     node = ctx.store.upsert_node(
                         id=parsed.id, title=parsed.title, type=parsed.type, status=parsed.status,
                         owner=parsed.owner, depends_on=parsed.depends_on, interfaces=parsed.interfaces,
-                        body=parsed.body, diagram="er" if parsed.type == "er" else "hld", **parsed.extra,
+                        body=parsed.body, diagram=parsed.type, **parsed.extra,
                     )
                 except (ValueError, TypeError) as exc:
                     return "text", {"error": str(exc)}
