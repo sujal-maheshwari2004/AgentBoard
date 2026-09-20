@@ -225,9 +225,13 @@ def register(project_dir: ProjectDir = Path(".")) -> None:
 def serve(project_dir: ProjectDir = Path(".")) -> None:
     """Run the server in the foreground (used by `start`)."""
     root = _root(project_dir)
-    sock, port = config.bind_port(root)
-    sock.close()  # run_foreground binds it again; SO_REUSEADDR makes that safe
-    os.environ["WHITEBOARD_PORT"] = str(port)
+    preset = os.environ.get("WHITEBOARD_PORT")
+    if preset and preset.isdigit():
+        port = int(preset)  # explicit request (tests, dev); run_foreground falls back if busy
+    else:
+        sock, port = config.bind_port(root)
+        sock.close()  # run_foreground binds it again; SO_REUSEADDR makes that safe
+        os.environ["WHITEBOARD_PORT"] = str(port)
     config.write_server_json(root, port)
     try:
         from whiteboard.server.app import run_foreground
