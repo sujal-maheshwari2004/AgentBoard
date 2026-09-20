@@ -86,6 +86,7 @@ class ClaudeBridge:
         self.max_lines = max_lines
 
         self._lines: deque[str] = deque(maxlen=max_lines)
+        self._loop: asyncio.AbstractEventLoop | None = None
         self._timer: asyncio.TimerHandle | None = None
         self._lock = asyncio.Lock()
         self._tlock = threading.Lock()
@@ -146,11 +147,35 @@ class ClaudeBridge:
         for line in lines:
             self.queue_line(line)
 
+    def bind_loop(self, loop: asyncio.AbstractEventLoop) -> None:
+        """Remember the server's event loop so lines queued from worker threads
+        (sync FastAPI routes, watchdog callbacks) still schedule a flush."""
+        self._loop = loop
+        with self._tlock:
+            pending = bool(self._lines)
+        if pending:
+            self._schedule(self.debounce_s)
+
     def _schedule(self, delay: float) -> None:
+        loop = self._loop
+        if loop is None:
+            try:
+                loop = asyncio.get_running_loop()
+            except RuntimeError:
+                return  # no loop yet; bind_loop() will schedule the pending lines
+        if loop.is_closed():
+            return
         try:
-            loop = asyncio.get_running_loop()
+            on_loop_thread = asyncio.get_running_loop() is loop
         except RuntimeError:
-            return  # no loop yet; the lines go out on the first push from a loop
+            on_loop_thread = False
+        if on_loop_thread:
+            self._schedule_on_loop(delay)
+        else:
+            loop.call_soon_threadsafe(self._schedule_on_loop, delay)
+
+    def _schedule_on_loop(self, delay: float) -> None:
+        loop = self._loop or asyncio.get_running_loop()
         if self._timer is not None:
             self._timer.cancel()
         self._timer = loop.call_later(delay, self._fire)

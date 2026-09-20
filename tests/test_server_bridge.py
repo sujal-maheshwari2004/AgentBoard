@@ -161,3 +161,24 @@ def test_queue_cap_drops_oldest() -> None:
     assert list(bridge._lines) == ["l2", "l3", "l4"] and bridge.dropped == 2
     bridge.queue_line("   ")  # blank lines are ignored
     assert len(bridge._lines) == 3
+
+
+async def test_queue_from_worker_thread_still_flushes(inbox: FakeInbox) -> None:
+    """Regression: sync FastAPI routes run in a threadpool, where there is no
+    running loop. Lines queued from such a thread must still be pushed."""
+    bridge = ClaudeBridge("proj", str(inbox.path), None, seq_provider=lambda: 7, debounce_s=0.05)
+    bridge.bind_loop(asyncio.get_running_loop())
+    await asyncio.to_thread(bridge.queue_line, "queued from a worker thread")
+    await asyncio.sleep(0.5)
+    assert len(inbox.connections) == 1
+    assert "queued from a worker thread" in inbox.connections[0][0]["text"]
+    assert bridge.pushes == 1
+
+
+async def test_bind_loop_flushes_lines_queued_before_startup(inbox: FakeInbox) -> None:
+    bridge = ClaudeBridge("proj", str(inbox.path), None, seq_provider=lambda: 1, debounce_s=0.05)
+    bridge.queue_line("early")  # scheduled from the loop, but before bind: still fine
+    bridge._loop = None
+    bridge.bind_loop(asyncio.get_running_loop())
+    await asyncio.sleep(0.4)
+    assert bridge.pushes == 1

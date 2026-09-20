@@ -173,6 +173,7 @@ def create_app(root: Path, *, mcp_factory: Callable | None = None) -> FastAPI:
         ctx.port = int(getattr(app.state, "port", 0) or os.environ.get("WHITEBOARD_PORT") or ctx.port or 0)
         ctx.load()
         loop = asyncio.get_running_loop()
+        ctx.bridge.bind_loop(loop)
         queue: asyncio.Queue[str] = asyncio.Queue()
         observer = None
         try:

@@ -41,12 +41,12 @@ class PasteBody(BaseModel):
 
 
 @router.get("/api/health")
-def health(request: Request) -> dict:
+async def health(request: Request) -> dict:
     return ctx_of(request).health()
 
 
 @router.get("/api/events")
-def events(request: Request, since: int = 0, limit: int = 500) -> dict:
+async def events(request: Request, since: int = 0, limit: int = 500) -> dict:
     ctx = ctx_of(request)
     limit = max(0, min(int(limit), 5000))
     items = ctx.log.read_since(int(since), limit=limit)
@@ -59,7 +59,7 @@ def events(request: Request, since: int = 0, limit: int = 500) -> dict:
 
 
 @router.post("/api/session")
-def session(request: Request, body: SessionBody) -> dict:
+async def session(request: Request, body: SessionBody) -> dict:
     """Re-target the root-session bridge (``session_hook.sh start`` / ``enter.sh``)."""
     ctx = ctx_of(request)
     ctx.bridge.retarget(body.socket or None, body.token)
@@ -69,7 +69,7 @@ def session(request: Request, body: SessionBody) -> dict:
 
 
 @router.post("/api/paste")
-def paste(request: Request, body: PasteBody) -> dict:
+async def paste(request: Request, body: PasteBody) -> dict:
     """Same as the websocket ``plan.paste``."""
     ctx = ctx_of(request)
     if not body.text.strip():
@@ -94,7 +94,7 @@ def paste(request: Request, body: PasteBody) -> dict:
 
 
 @router.get("/api/debug/state")
-def debug_state(request: Request) -> dict:
+async def debug_state(request: Request) -> dict:
     ctx = ctx_of(request)
     return {
         "snapshot": ctx.store.snapshot().model_dump(mode="json"),
@@ -118,17 +118,17 @@ def _jsonable(value: Any) -> Any:
 
 
 @router.get("/skeleton")
-def skeleton(request: Request) -> dict:
+async def skeleton(request: Request) -> dict:
     return ctx_of(request).store.skeleton().model_dump(mode="json")
 
 
 @router.get("/api/snapshot")
-def snapshot(request: Request) -> dict:
+async def snapshot(request: Request) -> dict:
     return ctx_of(request).store.snapshot().model_dump(mode="json")
 
 
 @router.get("/api/nodes/{node_id}")
-def node(request: Request, node_id: str) -> dict:
+async def node(request: Request, node_id: str) -> dict:
     found = ctx_of(request).store.get_node(node_id)
     if found is None:
         raise HTTPException(status_code=404, detail=f"unknown node {node_id!r}")
