@@ -1,5 +1,5 @@
 // Glue: socket ⇄ store ⇄ editor. Mounted once from <Tldraw onMount>; returns a cleanup.
-import type { Editor } from 'tldraw'
+import { react, type Editor } from 'tldraw'
 import { createSocket, socketUrl, type Socket } from '../ws/client'
 import { store, type Store } from '../state/store'
 import type { ClientPayloads, EditOp, LayoutPatch, NodeStatus, ServerMessage } from '../state/types'
@@ -12,6 +12,7 @@ import {
   deleteNode,
   ensureBoardFrames,
   folderLayout,
+  kindOf,
   nodeContext,
   onFolderCollapse,
   refreshAgents,
@@ -22,6 +23,7 @@ import {
 } from './apply'
 import { isBoardName, onBoardReparent, splitLayoutByBoard } from './boards'
 import { diagramEditPayload, planEditPayload } from '../shapes/agentFolder'
+import { chatSendPayload } from '../state/threads'
 import { installCollector } from './collect'
 import { onFrameCollapse } from './frame'
 
@@ -33,6 +35,8 @@ export interface Wiring {
   sendLayout(patch: LayoutPatch, board?: string): void
   setBoard(board: string): void
   setNodeStatus(id: string, status: NodeStatus): void
+  /** B.9: `thread` is `'root'` or an agent id; `replyTo` is the `chat.message` id being answered */
+  sendChat(text: string, thread: string, replyTo?: string | null): number
   /** B.6 folder editors; both return the seq so the sender can match an `edit.reject` */
   editAgentPlan(agentId: string, planMd: string): number
   editAgentDiagram(agentId: string, mermaid: string): number
@@ -162,6 +166,19 @@ export function mountWiring(editor: Editor, s: Store = store, url: string = sock
   // B.6: `frames['<agent-id>'].collapsed`, persisted on the board that owns the folder
   const offFolderCollapse = onFolderCollapse((board, patch) => sendLayout(patch, board))
   const offReparent = onBoardReparent((board, patch) => sendLayout(patch, board))
+  /**
+   * B.9/B.8: selecting an agent card on the canvas sets the active chat thread and opens the
+   * inspector. Deselecting is deliberately NOT propagated — the inspector stays until it is
+   * closed, so clicking the canvas to pan does not throw away what you were reading.
+   */
+  const offSelection = react('wb-agent-selection', () => {
+    const ids = editor.getSelectedShapeIds()
+    if (ids.length !== 1) return
+    const shape = editor.getShape(ids[0])
+    if (!shape || kindOf(shape) !== 'agent-card') return
+    const agentId = String(shape.meta.planId ?? '')
+    if (agentId) s.selectAgent(agentId)
+  })
 
   const wiring: Wiring = {
     socket,
@@ -173,6 +190,10 @@ export function mountWiring(editor: Editor, s: Store = store, url: string = sock
     },
     setNodeStatus(id, status) {
       socket.send('node.status', { id, status })
+    },
+    sendChat(text, thread, replyTo) {
+      // no ack: the server's projected `chat.message` is the receipt, and the reducer dedupes it
+      return socket.send('chat.message', chatSendPayload(text, thread, replyTo))
     },
     editAgentPlan(agentId, planMd) {
       return socket.send('agent.plan.edit', planEditPayload(agentId, planMd))
@@ -194,6 +215,7 @@ export function mountWiring(editor: Editor, s: Store = store, url: string = sock
       offCollapse()
       offFolderCollapse()
       offReparent()
+      offSelection()
       socket.close()
       if (current === wiring) current = null
     },

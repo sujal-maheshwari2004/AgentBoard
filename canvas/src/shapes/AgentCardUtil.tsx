@@ -207,7 +207,19 @@ function AgentCardBody({ shape }: { shape: AgentCardShape }) {
         </div>
 
         <div className="wb-agent-actions">
-          <button type="button" className="wb-agent-btn" onPointerDown={stop} onClick={(e) => { e.stopPropagation(); store.selectAgent(p.agentId) }}>
+          <button
+            type="button"
+            className="wb-agent-btn"
+            title={`Open the ${p.agentId} chat thread`}
+            onPointerDown={stop}
+            onClick={(e) => {
+              e.stopPropagation()
+              // B.9: the card's Chat button focuses this agent's THREAD (and expands the island),
+              // it no longer just "selects" the agent for a one-way textarea
+              store.openThread(p.agentId)
+              store.inspectAgent(p.agentId)
+            }}
+          >
             Chat
           </button>
           <button

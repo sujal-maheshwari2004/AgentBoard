@@ -2,11 +2,15 @@
 // Holds the last-known server truth plus UI-only state. Files are truth: nothing here persists.
 import { useSyncExternalStore } from 'react'
 import type {
-  AgentCard, BridgeStatus, Diagram, DiagramRequest, DispatchRequest, Layout, NeedsInputPrompt, PlanEdge,
+  AgentCard, BridgeStatus, ChatMessage, Diagram, DiagramRequest, DispatchRequest, Layout, NeedsInputPrompt, PlanEdge,
   PlanEvent, PlanNode, RiskyEditRequest, ServerMessage, SocketStatus,
 } from './types'
 import { edgeKey, primaryDiagram } from './types'
+import { anyAgentLive, isAgentLive } from './format'
+import { ROOT_THREAD, bumpUnread, clearUnread, mergeChatMessage, threadOf } from './threads'
 import { DEFAULT_BOARD, isBoardName } from '../sync/boards'
+
+export { anyAgentLive, isAgentLive }
 
 export interface TickerEntry {
   seq: number
@@ -35,6 +39,20 @@ export interface StoreState {
   /** B.10: board proposals awaiting the owner; re-sent on `client.hello`, so dedupe by `request_id` */
   diagramRequests: DiagramRequest[]
   ticker: TickerEntry[]
+  /**
+   * The retained raw events (B.11), capped at `EVENT_LIMIT`. The flattened `ticker` stays as it
+   * is; feeds (the agent inspector, the reworked ticker) need `data`/`agent_id`/`node_id`.
+   */
+  events: PlanEvent[]
+  /** `chat.message`s by thread, each list in `seq` order and deduped by `id` (B.9) */
+  threads: Record<string, ChatMessage[]>
+  threadUnread: Record<string, number>
+  /** `'root'` or an agent id; the thread the composer sends to */
+  activeThread: string
+  /** the chat island is expanded (false = the 44px unread pill) */
+  chatOpen: boolean
+  /** the agent the inspector shows; `selectedAgentId` is the canvas selection that seeds it */
+  inspectorAgentId: string | null
   bridge: BridgeStatus | null
   socket: SocketStatus
   selectedAgentId: string | null
@@ -51,6 +69,8 @@ export interface StoreState {
 }
 
 export const TICKER_LIMIT = 200
+/** raw events retained for the feeds (B.11) */
+export const EVENT_LIMIT = 500
 
 export function initialState(): StoreState {
   return {
@@ -68,6 +88,12 @@ export function initialState(): StoreState {
     riskyEdits: [],
     diagramRequests: [],
     ticker: [],
+    events: [],
+    threads: {},
+    threadUnread: {},
+    activeThread: ROOT_THREAD,
+    chatOpen: true,
+    inspectorAgentId: null,
     bridge: null,
     socket: 'connecting',
     selectedAgentId: null,
@@ -77,16 +103,6 @@ export function initialState(): StoreState {
     lastReject: null,
     lastError: null,
   }
-}
-
-/** an agent whose clock must tick: running (or waiting) and not finished (Temporal's rule) */
-export function isAgentLive(agent: AgentCard): boolean {
-  if (agent.finished_at) return false
-  return agent.status === 'working' || agent.status === 'blocked'
-}
-
-export function anyAgentLive(agents: Record<string, AgentCard>): boolean {
-  return Object.values(agents).some(isAgentLive)
 }
 
 /** the board a fresh snapshot lands on: `hld` when present, else the first board diagram */
@@ -100,6 +116,11 @@ function initialBoard(snap: Parameters<typeof primaryDiagram>[0]): string {
 function pushTicker(ticker: TickerEntry[], entry: TickerEntry): TickerEntry[] {
   const next = [...ticker, entry]
   return next.length > TICKER_LIMIT ? next.slice(next.length - TICKER_LIMIT) : next
+}
+
+function pushEvent(events: PlanEvent[], ev: PlanEvent): PlanEvent[] {
+  const next = [...events, ev]
+  return next.length > EVENT_LIMIT ? next.slice(next.length - EVENT_LIMIT) : next
 }
 
 function describeEvent(ev: PlanEvent): string {
@@ -164,13 +185,15 @@ export function reduce(state: StoreState, msg: ServerMessage): StoreState {
       const agents = { ...state.agents }
       delete agents[msg.payload.id]
       const selectedAgentId = state.selectedAgentId === msg.payload.id ? null : state.selectedAgentId
-      return { ...state, agents, selectedAgentId }
+      const inspectorAgentId = state.inspectorAgentId === msg.payload.id ? null : state.inspectorAgentId
+      return { ...state, agents, selectedAgentId, inspectorAgentId }
     }
     case 'event.append': {
       const ev = msg.payload
       return {
         ...state,
         lastSeq: Math.max(state.lastSeq, ev.seq),
+        events: pushEvent(state.events, ev),
         ticker: pushTicker(state.ticker, { seq: ev.seq, ts: ev.ts, kind: ev.type, text: describeEvent(ev) }),
       }
     }
@@ -230,6 +253,16 @@ export function reduce(state: StoreState, msg: ServerMessage): StoreState {
       }
     case 'bridge.status':
       return { ...state, bridge: msg.payload }
+    case 'chat.message': {
+      // backfill (50 per thread, replayed before the events on `client.hello`) and live traffic
+      // overlap on every reconnect, so `id` decides and `seq` orders (B.9 / A.4)
+      const thread = threadOf(msg.payload)
+      const merged = mergeChatMessage(state.threads[thread], msg.payload)
+      if (merged === null) return state
+      const threads = { ...state.threads, [thread]: merged }
+      if (thread === state.activeThread) return { ...state, threads }
+      return { ...state, threads, threadUnread: bumpUnread(state.threadUnread, thread) }
+    }
     default:
       return state
   }
@@ -240,7 +273,15 @@ export interface Store {
   subscribe(listener: () => void): () => void
   dispatch(msg: ServerMessage): void
   set(patch: Partial<StoreState> | ((s: StoreState) => Partial<StoreState>)): void
+  /** the canvas selection: also seeds the inspector and the active chat thread (B.9) */
   selectAgent(id: string | null): void
+  /** the inspector alone (its close button), leaving the canvas selection untouched */
+  inspectAgent(id: string | null): void
+  /** switch threads; opening a thread clears its unread count (B.9) */
+  setActiveThread(thread: string): void
+  /** the agent card's Chat button: focus the thread and expand the chat island */
+  openThread(thread: string): void
+  setChatOpen(open: boolean): void
   setActiveBoard(board: string): void
   setSocketStatus(status: SocketStatus): void
   removePrompt(promptId: string): void
@@ -312,7 +353,30 @@ export function createStore(init: StoreState = initialState(), timers: StoreTime
       emit()
     },
     selectAgent(id) {
-      store.set({ selectedAgentId: id })
+      if (id === null) {
+        store.set({ selectedAgentId: null, inspectorAgentId: null })
+        return
+      }
+      store.set((s) => ({
+        selectedAgentId: id,
+        inspectorAgentId: id,
+        activeThread: id,
+        threadUnread: clearUnread(s.threadUnread, id),
+      }))
+    },
+    inspectAgent(id) {
+      if (state.inspectorAgentId !== id) store.set({ inspectorAgentId: id })
+    },
+    setActiveThread(thread) {
+      const name = thread || ROOT_THREAD
+      store.set((s) => ({ activeThread: name, threadUnread: clearUnread(s.threadUnread, name) }))
+    },
+    openThread(thread) {
+      store.setActiveThread(thread)
+      store.set({ chatOpen: true })
+    },
+    setChatOpen(open) {
+      if (state.chatOpen !== open) store.set({ chatOpen: open })
     },
     setActiveBoard(board) {
       if (state.activeBoard !== board) store.set({ activeBoard: board })

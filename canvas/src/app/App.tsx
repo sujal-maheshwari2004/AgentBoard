@@ -8,7 +8,8 @@ import { store } from '../state/store'
 import { installZoomTracking } from '../sync/apply'
 import { FrameChrome, getShapeVisibility } from '../sync/frame'
 import { mountWiring } from '../sync/wire'
-import { ChatBox } from '../panels/ChatBox'
+import { AgentInspector } from '../panels/AgentInspector'
+import { ChatPanel } from '../panels/ChatPanel'
 import { DiagramProposal } from '../panels/DiagramProposal'
 import { DispatchPopup } from '../panels/DispatchPopup'
 import { EventTicker } from '../panels/EventTicker'
@@ -61,7 +62,8 @@ export function App() {
       </div>
       <Toolbar editor={editor} />
       <EventTicker />
-      <ChatBox />
+      <ChatPanel />
+      <AgentInspector />
       <NeedsInputModal />
       <DispatchPopup />
       <DiagramProposal />

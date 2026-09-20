@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import snapshotFixture from './fixtures/protocol/snapshot.json'
-import { CLOCK_INTERVAL_MS, TICKER_LIMIT, anyAgentLive, createStore, initialState, isAgentLive, reduce, type StoreState, type StoreTimers } from '../src/state/store'
+import { CLOCK_INTERVAL_MS, EVENT_LIMIT, TICKER_LIMIT, anyAgentLive, createStore, initialState, isAgentLive, reduce, type StoreState, type StoreTimers } from '../src/state/store'
 import { SERVER_MESSAGE_TYPES, type PlanSnapshot, type ServerMessage } from '../src/state/types'
 
 const snap = snapshotFixture as unknown as PlanSnapshot
@@ -112,6 +112,34 @@ describe('reducer', () => {
     expect(s.bridge).toEqual({ ok: false, failures: 2, last_error: 'socket gone' })
   })
 
+  it('retains the raw events too, capped at EVENT_LIMIT (B.11)', () => {
+    let s = loaded()
+    expect(s.events).toEqual([])
+    for (let i = 1; i <= EVENT_LIMIT + 10; i++) {
+      s = reduce(s, msg('event.append', { seq: i, ts: 't', agent_id: 'agent-x', node_id: 'node-x', type: 'heartbeat', note: `n${i}`, data: { i } }, i))
+    }
+    expect(s.events).toHaveLength(EVENT_LIMIT)
+    // the raw event keeps what the flattened ticker throws away: data, agent_id, node_id
+    expect(s.events.at(-1)).toMatchObject({ seq: EVENT_LIMIT + 10, agent_id: 'agent-x', node_id: 'node-x', data: { i: EVENT_LIMIT + 10 } })
+    expect(s.events[0].seq).toBe(11)
+    expect(s.ticker).toHaveLength(TICKER_LIMIT)
+  })
+
+  it('starts on the root thread with nothing unread and no inspector', () => {
+    const s = initialState()
+    expect(s.activeThread).toBe('root')
+    expect(s.threads).toEqual({})
+    expect(s.threadUnread).toEqual({})
+    expect(s.inspectorAgentId).toBeNull()
+    expect(s.chatOpen).toBe(true)
+  })
+
+  it('closes the inspector when its agent card is deleted', () => {
+    let s: StoreState = { ...loaded(), inspectorAgentId: 'agent-parser' }
+    s = reduce(s, msg('agent.card.delete', { id: 'agent-parser' }))
+    expect(s.inspectorAgentId).toBeNull()
+  })
+
   it('has a case for every server message type in CONTRACTS §6 (none falls through unchanged)', () => {
     const base = loaded()
     const payloads: Record<ServerMessage['type'], ServerMessage['payload']> = {
@@ -132,6 +160,7 @@ describe('reducer', () => {
       'layout.update': { diagram: 'hld', layout: { version: 2 } },
       'server.error': { code: 'c', message: 'm' },
       'bridge.status': { ok: true, failures: 0 },
+      'chat.message': { id: 'chat-1', thread: 'root', from: 'user', to: 'root', text: 'hi', ts: 't', seq: 1, reply_to: null, node_id: null },
     }
     for (const type of SERVER_MESSAGE_TYPES) {
       const next = reduce(base, { type, payload: payloads[type], seq: 1, ts: 't', replyTo: null } as ServerMessage)

@@ -97,6 +97,20 @@ export function agentElapsed(
   return Math.max(0, now - start)
 }
 
+/**
+ * An agent whose clock must tick: running (or waiting) and not finished (Temporal's rule).
+ * Lives here rather than in the store so `state/threads.ts` can ask the same question without
+ * importing the store (`store.ts` re-exports both for its existing callers).
+ */
+export function isAgentLive(agent: AgentCard): boolean {
+  if (agent.finished_at) return false
+  return agent.status === 'working' || agent.status === 'blocked'
+}
+
+export function anyAgentLive(agents: Record<string, AgentCard>): boolean {
+  return Object.values(agents).some(isAgentLive)
+}
+
 /** a live agent whose last heartbeat is older than 90s (B.7); finished agents never stall */
 export function agentStalled(
   card: Pick<AgentCard, 'status' | 'heartbeat_at' | 'finished_at'> | null | undefined,

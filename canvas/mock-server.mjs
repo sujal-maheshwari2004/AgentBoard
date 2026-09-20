@@ -106,7 +106,72 @@ function appendEvent({ agent_id = 'server', node_id = null, type, note = '', not
     if (c.ws.readyState !== 1) continue
     c.ws.send(JSON.stringify({ type: 'event.append', payload: ev, seq: ev.seq, ts: ev.ts, replyTo: null }))
   }
+  // the Bus projects every `chat` event into exactly one `chat.message` (A.4); the client
+  // dedupes on `id`, which is what makes the hello backfill safe
+  const projected = chatMessageFromEvent(ev)
+  if (projected) {
+    chatMessages.push(projected)
+    broadcast('chat.message', projected)
+  }
   return ev
+}
+
+// ---- chat threading (A.4 / B.9): one `chat.message` projected per `chat` event ----
+
+const CHAT_BACKFILL_PER_THREAD = 50
+const chatMessages = []
+
+/** mirror of `whiteboard/server/chat.py::thread_for` */
+function threadFor(sender, to, explicit) {
+  if (explicit && String(explicit).trim()) return String(explicit).trim()
+  sender = (sender ?? '').trim()
+  to = (to ?? '').trim()
+  if (sender === 'root' || sender === 'server') return 'root'
+  if (sender && sender !== 'user') return sender
+  return to && to !== 'user' ? to : 'root'
+}
+
+/** mirror of `chat_message_from_event`; returns null for anything that is not a chat event */
+function chatMessageFromEvent(ev) {
+  if (ev.type !== 'chat') return null
+  const d = ev.data ?? {}
+  const from = String(d.from ?? ev.agent_id ?? '')
+  const to = d.to ?? null
+  return {
+    id: `chat-${ev.seq}`,
+    thread: threadFor(from, to, d.thread),
+    from,
+    to: to ? String(to) : null,
+    text: ev.note,
+    ts: ev.ts,
+    seq: ev.seq,
+    reply_to: d.reply_to ? String(d.reply_to) : null,
+    node_id: ev.node_id,
+  }
+}
+
+/** the last N per thread, oldest first — what `client.hello` replays before the events */
+function chatBackfill(perThread = CHAT_BACKFILL_PER_THREAD) {
+  const byThread = new Map()
+  for (const m of chatMessages) {
+    if (!byThread.has(m.thread)) byThread.set(m.thread, [])
+    byThread.get(m.thread).push(m)
+  }
+  const out = []
+  for (const list of byThread.values()) out.push(...list.slice(-perThread))
+  out.sort((a, b) => a.seq - b.seq)
+  return out
+}
+
+/** history so a first load already has two threads to page through */
+function seedChat() {
+  const lines = [
+    { agent_id: 'user', note: 'can we merge parser and files into one node?', data: { from: 'user', to: 'root', thread: 'root' } },
+    { agent_id: 'root', note: 'no — files is already done and parser depends on it; merging would redo work', data: { from: 'root', to: 'user', thread: 'root' } },
+    { agent_id: 'user', note: 'use the fixture corpus in tests/fixtures for the fence tests', data: { from: 'user', to: 'agent-parser', thread: 'agent-parser' } },
+    { agent_id: 'agent-parser', note: 'ack — switching the tokenizer tests onto it now', data: { from: 'agent-parser', to: 'user', thread: 'agent-parser' } },
+  ]
+  for (const l of lines) appendEvent({ ...l, type: 'chat', node_id: null })
 }
 
 /**
@@ -134,6 +199,7 @@ function rebaseAgents() {
   for (const a of state.agents) rebaseAgent(a)
 }
 rebaseAgents()
+seedChat()
 
 const ACTIVITIES = [
   'writing the parser fence tests',
@@ -382,6 +448,10 @@ function handle(client, msg) {
     case 'client.hello': {
       client.hello = payload
       sendTo(client, 'plan.snapshot', snapshot())
+      // the last 50 per thread, ALWAYS and BEFORE the event replay (A.4 `on_hello`)
+      const backfill = chatBackfill()
+      for (const m of backfill) sendTo(client, 'chat.message', m)
+      log(`hello → ${backfill.length} chat.message backfill frame(s)`)
       const since = Number(payload?.lastSeq ?? 0)
       for (const ev of events) {
         if (ev.seq > since) client.ws.send(JSON.stringify({ type: 'event.append', payload: ev, seq: ev.seq, ts: ev.ts, replyTo: null }))
@@ -391,6 +461,19 @@ function handle(client, msg) {
       sendTo(client, 'bridge.status', { ok: true, failures: 0 })
       if (!client.scriptStarted) {
         client.scriptStarted = true
+        // live chat in both threads, then the whole backfill AGAIN at 16s (what a reconnect
+        // replays): the second burst overlaps every live message, so dedupe-by-id is exercised
+        // without pulling the socket
+        setTimeout(() => appendEvent({ agent_id: 'root', node_id: null, type: 'chat', note: 'dispatching node-canvas next — anything you want changed first?', data: { from: 'root', to: 'user', thread: 'root' } }), 6000)
+        setTimeout(() => appendEvent({ agent_id: 'agent-parser', node_id: 'node-parser', type: 'chat', note: 'fence header parses; moving on to edge labels', data: { from: 'agent-parser', to: 'user', thread: 'agent-parser', reply_to: 'chat-43' } }), 9000)
+        // one failing row so the feed's `--wb-blocked` tint is actually exercised (B.8)
+        setTimeout(() => appendEvent({ agent_id: 'agent-parser', node_id: 'node-parser', type: 'blocked', note: 'subgraph fences are ambiguous — need a decision' }), 11000)
+        setTimeout(() => {
+          if (client.ws.readyState !== 1) return
+          const again = chatBackfill()
+          for (const m of again) sendTo(client, 'chat.message', m)
+          log(`replayed ${again.length} chat.message frame(s) — the client must dedupe them all`)
+        }, 16000)
         for (const step of scripted) {
           setTimeout(() => {
             if (client.ws.readyState !== 1) return
@@ -471,8 +554,27 @@ function handle(client, msg) {
       break
     }
     case 'chat.message': {
-      appendEvent({ agent_id: 'user', node_id: payload.nodeId ?? null, type: 'chat', note: payload.text, data: { to: payload.agentId ?? 'root' } })
-      setTimeout(() => appendEvent({ agent_id: payload.agentId ?? 'root', node_id: null, type: 'reply', note: `ack: "${payload.text.slice(0, 40)}"` }), 800)
+      const to = payload.agentId ?? 'root'
+      const thread = payload.thread || to
+      const mine = appendEvent({
+        agent_id: 'user',
+        node_id: payload.nodeId ?? null,
+        type: 'chat',
+        note: payload.text,
+        data: { from: 'user', to, thread, reply_to: payload.reply_to ?? null },
+      })
+      // the answer comes back in the SAME thread and quotes what it answers
+      setTimeout(
+        () =>
+          appendEvent({
+            agent_id: to,
+            node_id: null,
+            type: 'chat',
+            note: `ack: "${payload.text.slice(0, 40)}"`,
+            data: { from: to, to: 'user', thread, reply_to: `chat-${mine.seq}` },
+          }),
+        800,
+      )
       break
     }
     case 'plan.paste': {
