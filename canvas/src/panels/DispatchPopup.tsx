@@ -6,7 +6,9 @@ import { getWiring } from '../sync/wire'
 export function DispatchPopup() {
   const dispatches = useStore((s) => s.dispatches)
   const risky = useStore((s) => s.riskyEdits)
-  if (risky.length) return null
+  const diagrams = useStore((s) => s.diagramRequests)
+  // B.8 precedence: risky edit → diagram proposal → dispatch → needs_input
+  if (risky.length || diagrams.length) return null
   const d = dispatches[0]
   if (!d) return null
   return <DispatchDialog key={d.request_id} requestId={d.request_id} nodeId={d.node_id} agentId={d.agent_id} jobSpec={d.job_spec_md} remaining={dispatches.length - 1} />
