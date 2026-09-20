@@ -1,6 +1,7 @@
 // Server truth → tldraw store. Every write is tagged remote (so the user-edit listener stays
 // quiet) and history-ignored (no undo pollution). Every function is idempotent.
 import {
+  react,
   toRichText,
   type Editor,
   type TLArrowBinding,
@@ -12,8 +13,11 @@ import {
   type TLGeoShape,
   type TLShape,
   type TLShapeId,
+  type TLShapePartial,
 } from 'tldraw'
 import { AGENT_CARD_H, AGENT_CARD_W, type AgentCardShape } from '../shapes/AgentCardUtil'
+import { PLAN_NODE_H, PLAN_NODE_W, type PlanNodeShape } from '../shapes/PlanNodeUtil'
+import { borderAlpha, zoomAtom } from './zoom'
 import {
   PLAN_FRAME_NAME,
   PLAN_FRAME_TITLE,
@@ -33,6 +37,8 @@ import { edgeKey, nodeReady, primaryDiagram } from '../state/types'
 export const DEFAULT_FRAME: LayoutFrame = { x: 0, y: 0, w: 1200, h: 800, collapsed: false }
 export const COLLAPSED_H = 48
 export const AGENT_GAP = 60
+/** the plan-node label hangs below the box (B.3); reserve room for it when growing the frame */
+export const PLAN_NODE_LABEL_H = 40
 
 export function remote(editor: Editor, fn: () => void): void {
   editor.store.mergeRemoteChanges(() => editor.run(fn, { history: 'ignore' }))
@@ -75,10 +81,16 @@ function findByMeta(editor: Editor, kind: ShapeKind, planId: string): TLShape | 
   return undefined
 }
 
-export function findNodeShape(editor: Editor, id: string): TLGeoShape | undefined {
-  const direct = editor.getShape<TLGeoShape>(nodeShapeId(id))
-  if (direct) return direct
-  return findByMeta(editor, 'plan-node', id) as TLGeoShape | undefined
+/**
+ * Either our `plan-node` shape or a human-drawn `geo` box we adopted (stamped `meta.kind`).
+ * Both carry numeric w/h, which is all the layout code needs.
+ */
+export type NodeShape = TLShape & { props: { w: number; h: number } }
+
+export function findNodeShape(editor: Editor, id: string): NodeShape | undefined {
+  const direct = editor.getShape(nodeShapeId(id))
+  if (direct) return direct as NodeShape
+  return findByMeta(editor, 'plan-node', id) as NodeShape | undefined
 }
 
 export function findEdgeShape(editor: Editor, src: string, dst: string): TLArrowShape | undefined {
@@ -129,10 +141,11 @@ export function fitFrame(editor: Editor): void {
   let h = frame.props.h
   for (const cid of editor.getSortedChildIdsForParent(frame.id)) {
     const s = editor.getShape(cid)
-    if (!s || s.type !== 'geo') continue
-    const g = s as TLGeoShape
+    if (!s || (s.type !== 'geo' && s.type !== 'plan-node')) continue
+    const g = s as NodeShape
     w = Math.max(w, g.x + g.props.w + FRAME_PAD)
-    h = Math.max(h, g.y + g.props.h + FRAME_PAD)
+    // the label hangs below the box, so leave room for it inside the frame
+    h = Math.max(h, g.y + g.props.h + PLAN_NODE_LABEL_H + FRAME_PAD)
   }
   if (w !== frame.props.w || h !== frame.props.h) {
     remote(editor, () => {
@@ -155,38 +168,43 @@ export function nodeContext(nodes: Iterable<PlanNode>): NodeContext {
 export function upsertNode(editor: Editor, node: PlanNode, ctx: NodeContext, pos?: { x: number; y: number; w?: number; h?: number }): void {
   const frame = ensureFrame(editor)
   const ready = nodeReady(node, ctx.byId)
-  const style = nodeStyle(node.status, ready)
+  const dispatched = node.owner != null
   const existing = findNodeShape(editor, node.id)
-  const label = toRichText(node.title)
+  const props = {
+    nodeId: node.id,
+    title: node.title,
+    // the node id, or the owning agent once dispatched (B.3)
+    subtitle: dispatched ? String(node.owner) : node.id,
+    type: node.type,
+    status: node.status,
+    ready,
+    dispatched,
+    owner: node.owner ?? '',
+  }
   remote(editor, () => {
     if (existing) {
-      editor.updateShape<TLGeoShape>({
-        id: existing.id,
-        type: 'geo',
-        props: { ...style, richText: label },
-        meta: { ...existing.meta, kind: 'plan-node', planId: node.id, status: node.status, provisional: false },
-      })
+      const meta = { ...existing.meta, kind: 'plan-node', planId: node.id, status: node.status, provisional: false }
+      if (existing.type === 'plan-node') {
+        editor.updateShape<PlanNodeShape>({ id: existing.id, type: 'plan-node', props, meta })
+      } else {
+        // a box the human drew and the server adopted: keep it a `geo`, restyle it the v1 way
+        editor.updateShape<TLGeoShape>({
+          id: existing.id,
+          type: 'geo',
+          props: { ...nodeStyle(node.status, ready), richText: toRichText(node.title) },
+          meta,
+        })
+      }
       return
     }
     const p = pos ?? { x: FRAME_PAD, y: FRAME_PAD }
-    editor.createShape<TLGeoShape>({
+    editor.createShape<PlanNodeShape>({
       id: nodeShapeId(node.id),
-      type: 'geo',
+      type: 'plan-node',
       parentId: frame.id,
       x: p.x,
       y: p.y,
-      props: {
-        geo: 'rectangle',
-        w: p.w ?? NODE_W,
-        h: p.h ?? NODE_H,
-        ...style,
-        size: 's',
-        font: 'sans',
-        align: 'middle',
-        verticalAlign: 'middle',
-        labelColor: 'black',
-        richText: label,
-      },
+      props: { ...props, w: p.w ?? PLAN_NODE_W, h: p.h ?? PLAN_NODE_H },
       meta: shapeMeta('plan-node', node.id, { status: node.status, hidden: !!frame.meta.collapsed }),
     })
   })
@@ -227,6 +245,39 @@ function ensureBindings(editor: Editor, arrowId: TLShapeId, src: string, dst: st
   }
 }
 
+/**
+ * B.4: solid = settled, marching dashes = in flight. An edge into a blocked node wins, so the
+ * failing path is lit up the spine (Phoenix). The renderer reads this off `meta` via the
+ * ShapeWrapper, which turns it into `data-wb-edge` for `styles/edges.css`.
+ */
+export type EdgeState = 'default' | 'working' | 'done' | 'blocked'
+
+export function edgeState(srcStatus: string, dstStatus: string): EdgeState {
+  if (dstStatus === 'blocked') return 'blocked'
+  if (srcStatus === 'in_progress') return 'working'
+  if (srcStatus === 'done') return 'done'
+  return 'default'
+}
+
+function statusOf(shape: NodeShape | undefined): string {
+  return String(shape?.meta?.status ?? 'todo')
+}
+
+/** re-stamp every edge whose endpoints' statuses moved (cheap: only changed metas are written) */
+export function refreshEdgeStates(editor: Editor): void {
+  const patches: TLShapePartial[] = []
+  for (const s of editor.getCurrentPageShapes()) {
+    if (kindOf(s) !== 'edge') continue
+    const pair = parseEdgeKey(String(s.meta.planId))
+    if (!pair) continue
+    const srcStatus = statusOf(findNodeShape(editor, pair.src))
+    const dstStatus = statusOf(findNodeShape(editor, pair.dst))
+    if (s.meta.srcStatus === srcStatus && s.meta.dstStatus === dstStatus) continue
+    patches.push({ id: s.id, type: s.type, meta: { ...s.meta, srcStatus, dstStatus } } as TLShapePartial)
+  }
+  if (patches.length) remote(editor, () => editor.updateShapes(patches))
+}
+
 export function upsertEdge(editor: Editor, edge: PlanEdge): void {
   const from = findNodeShape(editor, edge.src)
   const to = findNodeShape(editor, edge.dst)
@@ -235,6 +286,8 @@ export function upsertEdge(editor: Editor, edge: PlanEdge): void {
   const existing = findEdgeShape(editor, edge.src, edge.dst)
   const key = edgeKey(edge.src, edge.dst)
   const label = toRichText(edge.label ?? '')
+  const srcStatus = statusOf(from)
+  const dstStatus = statusOf(to)
   remote(editor, () => {
     let arrowId: TLShapeId
     if (existing) {
@@ -243,7 +296,7 @@ export function upsertEdge(editor: Editor, edge: PlanEdge): void {
         id: arrowId,
         type: 'arrow',
         props: { richText: label },
-        meta: { ...existing.meta, kind: 'edge', planId: key, diagram: edge.diagram },
+        meta: { ...existing.meta, kind: 'edge', planId: key, diagram: edge.diagram, srcStatus, dstStatus },
       })
     } else {
       arrowId = edgeShapeId(edge.src, edge.dst)
@@ -266,7 +319,7 @@ export function upsertEdge(editor: Editor, edge: PlanEdge): void {
           font: 'sans',
           richText: label,
         },
-        meta: shapeMeta('edge', key, { diagram: edge.diagram, hidden: !!frame.meta.collapsed }),
+        meta: shapeMeta('edge', key, { diagram: edge.diagram, hidden: !!frame.meta.collapsed, srcStatus, dstStatus }),
       })
     }
     ensureBindings(editor, arrowId, edge.src, edge.dst, from.id, to.id)
@@ -394,6 +447,7 @@ export function applySnapshot(editor: Editor, snap: PlanSnapshot): void {
 
   // edges
   for (const e of snap.edges) upsertEdge(editor, e)
+  refreshEdgeStates(editor)
 
   // agents
   snap.agents.forEach((a) => {
@@ -420,6 +474,7 @@ export function upsertNodeFromState(editor: Editor, node: PlanNode, all: PlanNod
   for (const other of all) {
     if (other.id !== node.id && other.depends_on.includes(node.id)) upsertNode(editor, other, ctx)
   }
+  refreshEdgeStates(editor)
 }
 
 /** restyle every card whose assigned node's readiness may have changed */
@@ -476,7 +531,7 @@ export function applyLayout(editor: Editor, layout: Layout, nodes: PlanNode[], e
       const w = l?.w ?? shape.props.w
       const h = l?.h ?? shape.props.h
       if (near(shape.x, p.x) && near(shape.y, p.y) && near(w, shape.props.w) && near(h, shape.props.h)) continue
-      editor.updateShape<TLGeoShape>({ id: shape.id, type: 'geo', x: p.x, y: p.y, props: { w, h } })
+      editor.updateShape({ id: shape.id, type: shape.type, x: p.x, y: p.y, props: { w, h } } as TLShapePartial)
     }
     for (const [id, l] of Object.entries(layout.agents ?? {})) {
       const shape = findAgentShape(editor, id)
@@ -498,6 +553,27 @@ export function relayoutLocal(editor: Editor, nodes: PlanNode[], edges: PlanEdge
   const pinned: NonNullable<Layout['nodes']> = {}
   for (const [id, l] of Object.entries(layout?.nodes ?? {})) if (l.pinned) pinned[id] = l
   applyLayout(editor, { direction: layout?.direction, nodes: pinned }, nodes, edges)
+}
+
+// ---------- zoom adaptation ----------
+
+/**
+ * Write `--wb-zoom` (and the derived border alpha) on the editor container, at camera *stop* only
+ * — n8n's zoom-adaptive borders and Dagster's degrade-to-dot both read them. Returns a disposer.
+ */
+export function installZoomTracking(editor: Editor): () => void {
+  const el = editor.getContainer()
+  const write = (zoom: number) => {
+    el.style.setProperty('--wb-zoom', String(zoom))
+    el.style.setProperty('--wb-border-alpha', borderAlpha(zoom).toFixed(3))
+    zoomAtom.set(zoom)
+  }
+  return react('wb-zoom', () => {
+    const zoom = editor.getZoomLevel()
+    // reading both keeps the reaction subscribed; we only publish once the camera settles
+    if (editor.getCameraState() !== 'idle') return
+    write(zoom)
+  })
 }
 
 // ---------- collapse ----------
