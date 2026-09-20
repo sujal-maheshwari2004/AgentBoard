@@ -352,3 +352,22 @@ def test_external_events_jsonl_append_is_tailed(client: TestClient, project: Pat
         ev, _ = recv_until(ws, "event.append", timeout=3.0)
         assert ev["seq"] == 1 and ev["payload"]["note"] == "from another process"
     assert _state(client).log.latest_seq == 1
+
+
+def test_dispatch_reply_is_idempotent(client: TestClient) -> None:
+    """A dispatch is decided once: a duplicate reply must not append a second
+    decision, or events.jsonl stops being a truthful audit trail."""
+    st = _state(client)
+    st.log.append(agent_id="root", node_id="node-c", type="dispatch_proposed", note="propose",
+                  data={"request_id": "dup-1", "node_id": "node-c", "agent_id": "agent-c"})
+    with client.websocket_connect("/ws") as ws:
+        hello(ws)
+        ws.send_json({"type": "dispatch.reply", "payload": {"request_id": "dup-1", "approved": True}, "seq": 2})
+        ev, _ = recv_until(ws, "event.append")
+        assert ev["payload"]["type"] == "dispatch_approved"
+        ws.send_json({"type": "dispatch.reply", "payload": {"request_id": "dup-1", "approved": True}, "seq": 3})
+        err, _ = recv_until(ws, "server.error")
+        assert err["payload"]["code"] == "already_resolved"
+    decisions = [e for e in st.log.read_since(0, limit=500)
+                 if e.data.get("request_id") == "dup-1" and e.type.startswith("dispatch_a")]
+    assert len(decisions) == 1

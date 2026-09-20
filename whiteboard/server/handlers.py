@@ -314,6 +314,12 @@ async def on_dispatch_reply(ctx: ServerContext, conn: Connection, msg: P.Dispatc
     if proposed is None:
         _error(ctx, conn, "unknown_request", f"no dispatch_proposed event with request_id {rid!r}", msg.seq)
         return
+    settled = _find_event(ctx, "dispatch_approved", rid) or _find_event(ctx, "dispatch_rejected", rid)
+    if settled is not None:
+        # A dispatch is decided once. Re-delivered or duplicated replies must not
+        # append a second decision: events.jsonl is the audit trail.
+        _error(ctx, conn, "already_resolved", f"dispatch {rid!r} was already {settled.type}", msg.seq)
+        return
     node_id = proposed.data.get("node_id") or proposed.node_id
     agent_id = proposed.data.get("agent_id") or proposed.agent_id
     note = (msg.payload.note or "").strip()
