@@ -25,6 +25,7 @@ const events = []
 const pendingRisky = new Map() // request_id -> {ops, forSeq, ws}
 
 const now = () => new Date().toISOString()
+const iso = (ms) => new Date(ms).toISOString()
 const log = (...a) => console.log(new Date().toISOString().slice(11, 23), ...a)
 
 const MIME = {
@@ -91,8 +92,84 @@ function appendEvent({ agent_id = 'server', node_id = null, type, note = '', not
   return ev
 }
 
+/**
+ * The fixture's live agents are rebased onto the wall clock at boot, so `⏱ 1m 23s` on the card
+ * reads as a real elapsed time rather than "six months" (B.7's shared `nowMs` clock).
+ */
+function rebaseAgent(a) {
+  const t = Date.now()
+  if (!a.spawned_at) return a
+  if (a.finished_at) {
+    // a finished agent keeps its frozen duration, moved to "a few minutes ago"
+    const dur = Math.max(1000, Date.parse(a.finished_at) - Date.parse(a.spawned_at))
+    a.spawned_at = iso(t - dur - 5 * 60_000)
+    a.heartbeat_at = iso(t - 5 * 60_000 - 2000)
+    a.finished_at = iso(t - 5 * 60_000)
+  } else {
+    const dur = Math.max(1000, (a.metrics?.elapsed_s ?? 83) * 1000)
+    a.spawned_at = iso(t - dur)
+    a.heartbeat_at = iso(t - 3000)
+  }
+  return a
+}
+
+function rebaseAgents() {
+  for (const a of state.agents) rebaseAgent(a)
+}
+rebaseAgents()
+
+const ACTIVITIES = [
+  'writing the parser fence tests',
+  'reading whiteboard/mermaid.py',
+  'running uv run pytest -q tests/test_mermaid.py',
+  'refactoring serialize() for edge labels',
+  'updating docs/CONTRACTS.md §4',
+]
+let beat = 0
+
+/** every 5s: bump one working agent's metrics and push a fresh card (A.5 `touch_agent`) */
+function heartbeat() {
+  const live = state.agents.filter((a) => a.status === 'working' && !a.finished_at)
+  if (!live.length || !clients.size) return
+  beat++
+  for (const a of live) {
+    const m = (a.metrics ??= {})
+    m.tool_calls = (m.tool_calls ?? 0) + 1
+    m.tokens_in = (m.tokens_in ?? 0) + 780
+    m.tokens_out = (m.tokens_out ?? 0) + 190
+    m.cost_usd = Number(((m.cost_usd ?? 0) + 0.012).toFixed(6))
+    m.elapsed_s = Math.round((Date.now() - Date.parse(a.spawned_at)) / 1000)
+    a.progress = Math.min(0.95, (a.progress ?? 0) + 0.02)
+    a.activity = ACTIVITIES[beat % ACTIVITIES.length]
+    a.heartbeat_at = now()
+    broadcast('agent.card.upsert', { agent: a })
+  }
+}
+setInterval(heartbeat, 5000)
+
 function snapshot() {
   return structuredClone(state)
+}
+
+function findAgent(id) {
+  return state.agents.find((a) => a.id === id)
+}
+
+/** the mock's stand-in for `whiteboard.mermaid.parse`: enough to exercise `edit.reject` */
+function badMermaid(text) {
+  const body = String(text ?? '').trim()
+  if (!body) return 'empty diagram'
+  if (!/^(flowchart|graph)\s+(TD|TB|LR|RL|BT)\b/.test(body)) {
+    return 'mermaid parse error: expected a `flowchart TD` header on line 1'
+  }
+  return null
+}
+
+/** replace (or append) the first fence of a diagrams.md document */
+function replaceFence(md, mermaid) {
+  const fence = '```mermaid\n' + mermaid.replace(/\s+$/, '') + '\n```'
+  if (/```[^\n]*\n[\s\S]*?```/.test(md)) return md.replace(/```[^\n]*\n[\s\S]*?```/, fence)
+  return `${md.trimEnd()}\n\n${fence}\n`.trimStart()
 }
 
 function findNode(id) {
@@ -208,10 +285,12 @@ function handle(client, msg) {
               else state.nodes.push(m.payload.node)
               broadcast(m.type, m.payload)
             } else if (m.type === 'agent.card.upsert') {
-              const idx = state.agents.findIndex((a) => a.id === m.payload.agent.id)
-              if (idx >= 0) state.agents[idx] = m.payload.agent
-              else state.agents.push(m.payload.agent)
-              broadcast(m.type, m.payload)
+              // the fixture's timestamps are fixed; rebase them so the card's clock stays live
+              const agent = rebaseAgent(structuredClone(m.payload.agent))
+              const idx = state.agents.findIndex((a) => a.id === agent.id)
+              if (idx >= 0) state.agents[idx] = agent
+              else state.agents.push(agent)
+              broadcast(m.type, { agent })
             } else sendTo(client, m.type, m.payload)
             log('scripted →', m.type)
           }, step.delayMs)
@@ -298,6 +377,36 @@ function handle(client, msg) {
       } else {
         appendEvent({ agent_id: 'root', node_id: 'node-canvas', type: 'dispatch_rejected', note: payload.note ?? '' })
       }
+      break
+    }
+    case 'agent.plan.edit': {
+      const a = findAgent(payload.agent_id)
+      if (!a) {
+        sendTo(client, 'server.error', { forSeq: seq, code: 'unknown_agent', message: `no agent ${payload.agent_id}` })
+        break
+      }
+      a.plan_md = payload.plan_md ?? ''
+      broadcast('agent.card.upsert', { agent: a })
+      sendTo(client, 'edit.ack', { forSeq: seq, rev: ++state.rev }, { replyTo: seq })
+      appendEvent({ agent_id: 'user', node_id: a.assigned_node, type: 'agent_plan_edited', note: `agent plan edited: ${a.id}`, data: { source: 'canvas', field: 'plan_md' } })
+      break
+    }
+    case 'agent.diagram.edit': {
+      const a = findAgent(payload.agent_id)
+      if (!a) {
+        sendTo(client, 'server.error', { forSeq: seq, code: 'unknown_agent', message: `no agent ${payload.agent_id}` })
+        break
+      }
+      const reason = badMermaid(payload.mermaid)
+      if (reason) {
+        sendTo(client, 'edit.reject', { forSeq: seq, reason, revert: [] }, { replyTo: seq })
+        break
+      }
+      a.diagrams_md = replaceFence(a.diagrams_md ?? '', payload.mermaid)
+      a.diagram = { mermaid: String(payload.mermaid).trim(), direction: 'TD', nodes: [], edges: [], error: null }
+      broadcast('agent.card.upsert', { agent: a })
+      sendTo(client, 'edit.ack', { forSeq: seq, rev: ++state.rev }, { replyTo: seq })
+      appendEvent({ agent_id: 'user', node_id: a.assigned_node, type: 'agent_plan_edited', note: `agent diagram edited: ${a.id}`, data: { source: 'canvas', field: 'diagrams_md' } })
       break
     }
     case 'node.status': {

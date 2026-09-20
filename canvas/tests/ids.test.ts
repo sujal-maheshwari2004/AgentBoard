@@ -3,6 +3,7 @@ import {
   agentShapeId,
   bindingId,
   edgeShapeId,
+  folderShapeId,
   frameShapeId,
   nodeShapeId,
   parseEdgeKey,
@@ -22,6 +23,9 @@ describe('shape ids', () => {
     expect(frameShapeId('board-hld')).toBe('shape:f_board-hld')
     expect(frameShapeId('board-lld')).toBe('shape:f_board-lld')
     expect(frameShapeId('board-er')).toBe('shape:f_board-er')
+    // B.6 agent folders get their OWN prefix; `f_`'s parse stays exactly as it was
+    expect(folderShapeId('agent-parser')).toBe('shape:g_agent-parser')
+    expect(folderShapeId('agent-parser')).not.toBe(frameShapeId('agent-parser'))
     expect(edgeShapeId('node-a', 'node-b')).toBe('shape:e_node-a__node-b')
     expect(bindingId('node-a', 'node-b', 'start')).toBe('binding:b_node-a__node-b_start')
     expect(bindingId('node-a', 'node-b', 'end')).toBe('binding:b_node-a__node-b_end')
@@ -33,6 +37,7 @@ describe('shape ids', () => {
     expect(parseShapeId(frameShapeId('plan-board'))).toEqual({ kind: 'plan-frame', id: 'plan-board' })
     expect(parseShapeId(frameShapeId('board-hld'))).toEqual({ kind: 'plan-frame', id: 'board-hld' })
     expect(parseShapeId(frameShapeId('board-er'))).toEqual({ kind: 'plan-frame', id: 'board-er' })
+    expect(parseShapeId(folderShapeId('agent-parser'))).toEqual({ kind: 'agent-folder', id: 'agent-parser' })
     expect(parseShapeId(edgeShapeId('node-a', 'node-b'))).toEqual({ kind: 'edge', id: 'node-a__node-b', src: 'node-a', dst: 'node-b' })
   })
 
@@ -50,6 +55,7 @@ describe('shape ids', () => {
       [agentShapeId, 'agent-card', 'agent-1'],
       [frameShapeId, 'plan-frame', 'plan-board'],
       [frameShapeId, 'plan-frame', 'board-lld'],
+      [folderShapeId, 'agent-folder', 'agent-parser'],
     ] as const) {
       expect(parseShapeId(make(id))).toMatchObject({ kind, id })
     }
@@ -65,6 +71,7 @@ describe('shape ids', () => {
   it('stamps meta with kind and planId', () => {
     expect(shapeMeta('plan-node', 'node-a')).toEqual({ kind: 'plan-node', planId: 'node-a' })
     expect(shapeMeta('edge', 'a__b', { diagram: 'hld' })).toEqual({ kind: 'edge', planId: 'a__b', diagram: 'hld' })
+    expect(shapeMeta('agent-folder', 'agent-parser')).toEqual({ kind: 'agent-folder', planId: 'agent-parser' })
   })
 
   it('slugifies labels into provisional node ids', () => {

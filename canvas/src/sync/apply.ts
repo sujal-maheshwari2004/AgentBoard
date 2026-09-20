@@ -20,7 +20,16 @@ import {
   type TLShapeId,
   type TLShapePartial,
 } from 'tldraw'
-import { AGENT_CARD_H, AGENT_CARD_W, type AgentCardShape } from '../shapes/AgentCardUtil'
+import { AGENT_CARD_H, AGENT_CARD_W, agentCardFacts } from '../shapes/agentCard'
+import type { AgentCardShape } from '../shapes/AgentCardUtil'
+import {
+  FOLDER_COLLAPSED_H,
+  FOLDER_H,
+  FOLDER_W,
+  folderCollapsePatch,
+  folderMermaid,
+} from '../shapes/agentFolder'
+import type { AgentFolderShape } from '../shapes/AgentFolderUtil'
 import { PLAN_NODE_H, PLAN_NODE_W, type PlanNodeShape } from '../shapes/PlanNodeUtil'
 import { borderAlpha, zoomAtom } from './zoom'
 import {
@@ -43,13 +52,14 @@ import {
   agentShapeId,
   bindingId,
   edgeShapeId,
+  folderShapeId,
   nodeShapeId,
   parseEdgeKey,
   shapeMeta,
   type ShapeKind,
 } from '../shapes/ids'
 import { FRAME_PAD, NODE_H, NODE_W, boundsOf, positionsForMissing, relayoutUnpinned, type ExistingPosition, type LayoutEdgeInput, type LayoutNodeInput } from '../layout/dagre'
-import type { AgentCard, Layout, LayoutFrame, NodeStatus, PlanEdge, PlanNode, PlanSnapshot } from '../state/types'
+import type { AgentCard, Layout, LayoutFrame, LayoutPatch, NodeStatus, PlanEdge, PlanNode, PlanSnapshot } from '../state/types'
 import { edgeKey, nodeReady } from '../state/types'
 
 export const COLLAPSED_H = COLLAPSED_BOARD_H
@@ -63,7 +73,7 @@ export function remote(editor: Editor, fn: () => void): void {
 
 export function kindOf(shape: TLShape | undefined): ShapeKind | null {
   const k = shape?.meta?.kind
-  return k === 'plan-node' || k === 'agent-card' || k === 'plan-frame' || k === 'edge' ? k : null
+  return k === 'plan-node' || k === 'agent-card' || k === 'plan-frame' || k === 'edge' || k === 'agent-folder' ? k : null
 }
 
 export function isOurs(shape: TLShape | undefined): boolean {
@@ -441,10 +451,11 @@ export function upsertAgent(editor: Editor, agent: AgentCard, ctx: NodeContext, 
   const props = {
     agentId: agent.id,
     name: agent.id,
-    status: agent.status,
     detail: agentDetail(agent),
     ready,
     nodeId: agent.assigned_node ?? '',
+    // live monitoring (B.7): flat primitives, because tldraw validates each prop on its own
+    ...agentCardFacts(agent),
   }
   const ownerFrameId = node ? boardForNode(editor, node).frameId : boardFrameId(presentBoards(editor)[0] ?? 'hld')
   remote(editor, () => {
@@ -480,6 +491,148 @@ export function nextAgentSlot(editor: Editor, ownerFrameId: TLShapeId): { x: num
 export function deleteAgent(editor: Editor, id: string): void {
   const shape = findAgentShape(editor, id)
   if (shape && kindOf(shape) === 'agent-card') remote(editor, () => editor.deleteShapes([shape.id]))
+}
+
+// ---------- agent folders (B.6) ----------
+
+export const FOLDER_GAP = 24
+
+export function findFolderShape(editor: Editor, agentId: string): AgentFolderShape | undefined {
+  return editor.getShape<AgentFolderShape>(folderShapeId(agentId))
+}
+
+/** the saved `frames['<agent-id>']` entry, whichever board's sidecar happens to hold it */
+export function folderLayout(layouts: Record<string, Layout> | undefined, agentId: string): LayoutFrame | undefined {
+  for (const l of Object.values(layouts ?? {})) {
+    const f = l.frames?.[agentId]
+    if (f) return f
+  }
+  return undefined
+}
+
+/**
+ * Folders sit in a row under the agent cards of their owner board — the inter-board gutter is
+ * only 200px, so anything placed to the RIGHT of a board would land on the next one (B.S2's
+ * hand-off note; B.6's "to the right of its owned node" is the one deviation here).
+ */
+export function nextFolderSlot(editor: Editor, ownerFrameId: TLShapeId): { x: number; y: number } {
+  const frame = getFrame(editor, ownerFrameId)
+  const origin = frameOrigin(editor, ownerFrameId)
+  const y = origin.y + (frame ? frame.props.h : 0) + AGENT_GAP + AGENT_CARD_H + FOLDER_GAP
+  let count = 0
+  for (const s of editor.getCurrentPageShapes()) {
+    if (kindOf(s) !== 'agent-folder') continue
+    if (Math.abs(s.y - y) < 1) count++
+  }
+  return { x: origin.x + count * (FOLDER_W + 20), y }
+}
+
+/** the board whose sidecar owns this folder: its node's board, else the first board present */
+function folderBoard(editor: Editor, node: PlanNode | undefined): BoardName {
+  if (node) return boardForNode(editor, node).board
+  return presentBoards(editor)[0] ?? 'hld'
+}
+
+/**
+ * One folder per agent, created on the first snapshot that mentions it and updated in place
+ * afterwards. `saved` is the sidecar entry (`frames['agent-parser']`), which carries both the
+ * geometry and the collapse flag.
+ */
+export function upsertAgentFolder(editor: Editor, agent: AgentCard, ctx: NodeContext, saved?: LayoutFrame): void {
+  const node = agent.assigned_node ? ctx.byId.get(agent.assigned_node) : undefined
+  const board = folderBoard(editor, node)
+  const existing = findFolderShape(editor, agent.id)
+  const props = {
+    agentId: agent.id,
+    ownerNode: agent.assigned_node ?? '',
+    status: agent.status,
+    planMd: agent.plan_md ?? '',
+    mermaid: folderMermaid(agent),
+    diagramError: String(agent.diagram?.error ?? ''),
+  }
+  remote(editor, () => {
+    if (existing) {
+      editor.updateShape<AgentFolderShape>({ id: existing.id, type: 'agent-folder', props })
+      return
+    }
+    const slot = nextFolderSlot(editor, boardFrameId(board))
+    const collapsed = !!saved?.collapsed
+    const w = typeof saved?.w === 'number' ? saved.w : FOLDER_W
+    const expandedH = typeof saved?.h === 'number' ? saved.h : FOLDER_H
+    editor.createShape<AgentFolderShape>({
+      id: folderShapeId(agent.id),
+      type: 'agent-folder',
+      x: typeof saved?.x === 'number' ? saved.x : slot.x,
+      y: typeof saved?.y === 'number' ? saved.y : slot.y,
+      props: { ...props, w, h: collapsed ? FOLDER_COLLAPSED_H : expandedH },
+      meta: shapeMeta('agent-folder', agent.id, {
+        ownerNode: agent.assigned_node ?? '',
+        board,
+        hidden: false,
+        collapsed,
+        expandedH,
+      }),
+    })
+  })
+}
+
+export function deleteAgentFolder(editor: Editor, agentId: string): void {
+  const shape = findFolderShape(editor, agentId)
+  if (shape) remote(editor, () => editor.deleteShapes([shape.id]))
+}
+
+/**
+ * Collapse/expand one folder. Same primitive as a board frame — `meta.collapsed` on the folder,
+ * `meta.hidden` on its children, the height shrinks to 36px and `meta.expandedH` remembers the
+ * old one — and it returns the sidecar entry to persist under the agent's own key.
+ */
+export function setFolderCollapsed(editor: Editor, folderId: TLShapeId, collapsed: boolean): LayoutFrame | null {
+  const folder = editor.getShape<AgentFolderShape>(folderId)
+  if (!folder || kindOf(folder) !== 'agent-folder') return null
+  if (!!folder.meta.collapsed === collapsed) return null
+  const expandedH = Number(folder.meta.expandedH ?? FOLDER_H)
+  const patch = folderCollapsePatch({ x: folder.x, y: folder.y, w: folder.props.w, h: folder.props.h, expandedH }, collapsed)
+  remote(editor, () => {
+    editor.updateShape<AgentFolderShape>({
+      id: folder.id,
+      type: 'agent-folder',
+      props: { h: collapsed ? FOLDER_COLLAPSED_H : patch.h },
+      meta: { ...folder.meta, collapsed, expandedH: patch.h },
+    })
+  })
+  // folders hold their editors in the shape itself, but a child dropped into one still hides
+  setCollapsedVisibility(editor, folderId, collapsed)
+  return patch
+}
+
+/** the card's "Open folder" button: expand it if it is shut, then put the camera on it */
+export function revealAgentFolder(editor: Editor, agentId: string): boolean {
+  const folder = findFolderShape(editor, agentId)
+  if (!folder) return false
+  if (folder.meta.collapsed) notifyFolderCollapse(editor, folder.id, false)
+  editor.select(folder.id)
+  editor.zoomToSelection({ animation: { duration: 250 } })
+  return true
+}
+
+/** `(board, patch)` — the folder's collapse flag belongs to its owner board's sidecar */
+export type FolderCollapseListener = (board: string, patch: LayoutPatch) => void
+const folderListeners = new Set<FolderCollapseListener>()
+
+/** kept here (not in frame.tsx) so `revealAgentFolder` can persist an expand too */
+export function onFolderCollapse(fn: FolderCollapseListener): () => void {
+  folderListeners.add(fn)
+  return () => folderListeners.delete(fn)
+}
+
+export function notifyFolderCollapse(editor: Editor, folderId: TLShapeId, collapsed: boolean): void {
+  const folder = editor.getShape<AgentFolderShape>(folderId)
+  if (!folder) return
+  const agentId = String(folder.meta.planId)
+  const board = String(folder.meta.board ?? presentBoards(editor)[0] ?? 'hld')
+  const patch = setFolderCollapsed(editor, folderId, collapsed)
+  if (!patch) return
+  folderListeners.forEach((l) => l(board, { frames: { [agentId]: patch } }))
 }
 
 // ---------- positions ----------
@@ -571,6 +724,7 @@ export function applySnapshot(editor: Editor, snap: PlanSnapshot): void {
     if (kind === 'plan-node' && !nodeIds.has(planId) && !s.meta.provisional) stale.push(s.id)
     else if (kind === 'edge' && !edgeKeys.has(planId) && !s.meta.provisional) stale.push(s.id)
     else if (kind === 'agent-card' && !agentIds.has(planId)) stale.push(s.id)
+    else if (kind === 'agent-folder' && !agentIds.has(planId)) stale.push(s.id)
   }
   if (stale.length) remote(editor, () => editor.deleteShapes(stale))
 
@@ -582,6 +736,8 @@ export function applySnapshot(editor: Editor, snap: PlanSnapshot): void {
   snap.agents.forEach((a) => {
     const l = agentLayout(snap.layout, a.id)
     upsertAgent(editor, a, ctx, l ? { x: l.x, y: l.y, w: l.w, h: l.h } : undefined)
+    // B.6: one folder per agent, geometry and collapse flag from `frames['<agent-id>']`
+    upsertAgentFolder(editor, a, ctx, folderLayout(snap.layout, a.id))
   })
 
   for (const board of present) {
@@ -616,6 +772,12 @@ export function upsertNodeFromState(editor: Editor, node: PlanNode, all: PlanNod
 export function refreshAgents(editor: Editor, agents: AgentCard[], nodes: PlanNode[]): void {
   const ctx = nodeContext(nodes)
   for (const a of agents) if (findAgentShape(editor, a.id)) upsertAgent(editor, a, ctx)
+}
+
+/** a card push also refreshes the folder's plan/diagram text and hue */
+export function upsertAgentAndFolder(editor: Editor, agent: AgentCard, ctx: NodeContext, pos?: { x: number; y: number; w?: number; h?: number }, saved?: LayoutFrame): void {
+  upsertAgent(editor, agent, ctx, pos)
+  upsertAgentFolder(editor, agent, ctx, saved)
 }
 
 // ---------- layout ----------

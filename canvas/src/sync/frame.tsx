@@ -2,7 +2,7 @@
 // space through the OnTheCanvas slot, so it pans/zooms with the page) that collapses/expands
 // that board.
 import { useEditor, useValue, type Editor, type TLFrameShape, type TLShape, type TLShapeId } from 'tldraw'
-import { getFrame, setFrameCollapsed } from './apply'
+import { getFrame, notifyFolderCollapse, setFrameCollapsed } from './apply'
 import { boardFrameId, boardLayoutKey, boardOfFrameId, presentBoards, type BoardName } from './boards'
 import type { LayoutPatch } from '../state/types'
 
@@ -30,6 +30,16 @@ export function toggleFrame(editor: Editor, frameId: TLShapeId): void {
     const patch: LayoutPatch = { frames: { [boardLayoutKey(board)]: next } }
     listeners.forEach((l) => l(board, patch))
   }
+}
+
+/**
+ * B.6: the agent folder's own chevron. Same primitive as a board frame, but the patch is keyed
+ * by the agent id and persisted on the folder's owner board (`apply.notifyFolderCollapse`).
+ */
+export function toggleFolder(editor: Editor, folderId: TLShapeId): void {
+  const folder = editor.getShape(folderId)
+  if (!folder) return
+  notifyFolderCollapse(editor, folderId, !folder.meta.collapsed)
 }
 
 export function FrameChrome() {

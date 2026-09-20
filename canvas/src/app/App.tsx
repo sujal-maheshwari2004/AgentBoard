@@ -1,6 +1,7 @@
 import { useCallback, useMemo, useState } from 'react'
 import { Tldraw, type Editor, type TLComponents } from 'tldraw'
 import { AgentCardUtil } from '../shapes/AgentCardUtil'
+import { AgentFolderUtil } from '../shapes/AgentFolderUtil'
 import { PlanNodeUtil } from '../shapes/PlanNodeUtil'
 import { WbShapeWrapper } from '../shapes/ShapeWrapper'
 import { store } from '../state/store'
@@ -15,7 +16,7 @@ import { RiskyEditConfirm } from '../panels/RiskyEditConfirm'
 import { Toolbar } from '../panels/Toolbar'
 import '../panels/panels.css'
 
-const shapeUtils = [AgentCardUtil, PlanNodeUtil]
+const shapeUtils = [AgentCardUtil, AgentFolderUtil, PlanNodeUtil]
 const components: TLComponents = { ContextMenu: null, OnTheCanvas: FrameChrome, ShapeWrapper: WbShapeWrapper }
 
 export function App() {

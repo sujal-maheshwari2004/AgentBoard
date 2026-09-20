@@ -18,8 +18,8 @@
     { "src": "node-server", "dst": "node-cli", "label": null, "diagram": "hld" }
   ],
   "agents": [
-    { "id": "agent-files", "assigned_node": "node-files", "status": "done", "claude_agent_ref": "files-1", "ready_deps": [], "spawned_at": "2026-09-20T00:01:00.000Z", "notes": "atomic writes + frontmatter landed", "plan_md": "", "diagrams_md": "" },
-    { "id": "agent-parser", "assigned_node": "node-parser", "status": "idle", "claude_agent_ref": null, "ready_deps": ["node-files"], "spawned_at": null, "notes": "", "plan_md": "# Job: node-parser\n\nImplement parse/serialize.", "diagrams_md": "" }
+    { "id": "agent-files", "assigned_node": "node-files", "status": "done", "claude_agent_ref": "files-1", "ready_deps": [], "spawned_at": "2026-09-20T00:01:00.000Z", "activity": "frontmatter round-trip verified", "progress": 1, "heartbeat_at": "2026-09-20T00:12:30.000Z", "finished_at": "2026-09-20T00:13:04.000Z", "metrics": { "elapsed_s": 724, "tool_calls": 31, "files_touched": ["whiteboard/files.py", "tests/test_files.py", "docs/CONTRACTS.md"], "tokens_in": 51200, "tokens_out": 9800, "cost_usd": 0.91 }, "notes": "atomic writes + frontmatter landed", "plan_md": "# Job: node-files\n\nAtomic writes and frontmatter split.\n", "diagrams_md": "# Diagrams\n\n```mermaid\nflowchart TD\n    atomic_write --> fsync\n    split_frontmatter --> yaml\n```\n", "diagram": { "mermaid": "flowchart TD\n    atomic_write --> fsync\n    split_frontmatter --> yaml", "direction": "TD", "nodes": [{ "id": "atomic_write" }, { "id": "fsync" }, { "id": "split_frontmatter" }, { "id": "yaml" }], "edges": [{ "src": "atomic_write", "dst": "fsync" }, { "src": "split_frontmatter", "dst": "yaml" }], "error": null } },
+    { "id": "agent-parser", "assigned_node": "node-parser", "status": "working", "claude_agent_ref": "parser-1", "ready_deps": ["node-files"], "spawned_at": "2026-09-20T00:14:00.000Z", "activity": "writing the parser fence tests", "progress": 0.62, "heartbeat_at": "2026-09-20T00:15:23.000Z", "finished_at": null, "metrics": { "elapsed_s": 83, "tool_calls": 14, "files_touched": ["whiteboard/mermaid.py", "tests/test_mermaid.py", "docs/CONTRACTS.md", "whiteboard/plan/store.py", "templates/lld.md", "README.md"], "tokens_in": 33000, "tokens_out": 8200, "cost_usd": 0.38 }, "notes": "", "plan_md": "# Job: node-parser\n\nImplement parse/serialize.\n\n## Deliverables\n- parse(text) -> MermaidDoc\n- serialize(doc) -> str\n", "diagrams_md": "# Diagrams\n\n```mermaid\nflowchart TD\n    lexer --> parser\n    parser --> doc\n    doc --> serializer\n```\n", "diagram": { "mermaid": "flowchart TD\n    lexer --> parser\n    parser --> doc\n    doc --> serializer", "direction": "TD", "nodes": [{ "id": "lexer" }, { "id": "parser" }, { "id": "doc" }, { "id": "serializer" }], "edges": [{ "src": "lexer", "dst": "parser" }, { "src": "parser", "dst": "doc" }, { "src": "doc", "dst": "serializer" }], "error": null } }
   ],
   "diagrams": [
     {
@@ -49,7 +49,11 @@
       "version": 1,
       "direction": "TD",
       "updatedAt": "2026-09-20T00:00:00.000Z",
-      "frames": { "plan-board": { "x": 0, "y": 0, "w": 1000, "h": 700, "collapsed": false } },
+      "frames": {
+        "plan-board": { "x": 0, "y": 0, "w": 1000, "h": 700, "collapsed": false },
+        "board-hld": { "x": 0, "y": 0, "w": 1600, "h": 1000, "collapsed": false },
+        "agent-files": { "x": 0, "y": 1252, "w": 320, "h": 240, "collapsed": true }
+      },
       "nodes": {
         "node-files": { "x": 400, "y": 40, "w": 200, "h": 80, "parent": "plan-board", "pinned": true }
       },

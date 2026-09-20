@@ -1,0 +1,208 @@
+/*
+ * `agent-card` chrome (plan B.7). 260x132, five rows, and the same conic ring the plan node uses:
+ * 1.5s while working, 4.5s while blocked — one mechanism, two meanings (B.1 item 3).
+ *
+ * `@property --wb-angle` and `@keyframes wb-rotate` are declared once in PlanNodeUtil.css.
+ */
+
+.wb-agent {
+  /* no z-index / opacity / transform / filter here: this element must not open a stacking
+     context, or the `z-index: -1` ring below would paint on top of the card instead of behind it */
+  position: relative;
+  box-sizing: border-box;
+  display: flex;
+  flex-direction: column;
+  gap: var(--wb-s2);
+  padding: var(--wb-s4) var(--wb-s4);
+  /* `visible`, not `hidden`: the conic ring sits 3px outside the box (each row clips itself) */
+  overflow: visible;
+  border-radius: var(--wb-r3);
+  background: var(--wb-island);
+  border: 1.5px solid var(--wb-border-2);
+  box-shadow: var(--wb-shadow-1);
+  font-family: var(--wb-font);
+  color: var(--wb-text);
+  --wb-agent-hue: var(--wb-idle);
+}
+
+.wb-agent[data-status='working'] { --wb-agent-hue: var(--wb-working); }
+.wb-agent[data-status='blocked'] { --wb-agent-hue: var(--wb-blocked); }
+.wb-agent[data-status='done'] { --wb-agent-hue: var(--wb-done); }
+
+.wb-agent.running,
+.wb-agent.waiting,
+.wb-agent.done {
+  border: 2px solid var(--wb-agent-hue);
+}
+
+/* ---------- row 1: dot + name + status + elapsed ---------- */
+
+.wb-agent-row1 {
+  display: flex;
+  align-items: center;
+  gap: var(--wb-s3);
+  flex: none;
+}
+
+.wb-agent-dot {
+  width: 10px;
+  height: 10px;
+  flex: none;
+  border-radius: 50%;
+  background: var(--wb-agent-hue);
+}
+
+.wb-agent-name {
+  font-size: var(--wb-t4);
+  font-weight: 600;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+.wb-agent-status {
+  font-size: var(--wb-t2);
+  color: var(--wb-agent-hue);
+  flex: none;
+}
+
+.wb-agent-elapsed {
+  font-family: var(--wb-mono);
+  font-size: var(--wb-t2);
+  color: var(--wb-text-2);
+  flex: none;
+  font-variant-numeric: tabular-nums;
+}
+
+/* ---------- row 2: activity ---------- */
+
+.wb-agent-activity {
+  flex: none;
+  font-size: var(--wb-t3);
+  color: var(--wb-text-2);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+/* a heartbeat older than 90s: the line greys out and says so (B.7) */
+.wb-agent-activity.stalled {
+  color: var(--wb-text-3);
+  font-style: italic;
+}
+
+/* ---------- row 3: 6px progress rail (ComfyUI's flush-under-the-title bar) + % ---------- */
+
+.wb-agent-progress {
+  flex: none;
+  display: flex;
+  align-items: center;
+  gap: var(--wb-s3);
+}
+
+.wb-agent-rail {
+  flex: 1 1 auto;
+  height: 6px;
+  border-radius: 3px;
+  background: color-mix(in srgb, var(--wb-text) 10%, transparent);
+  overflow: hidden;
+}
+
+.wb-agent-rail-fill {
+  display: block;
+  height: 100%;
+  border-radius: 3px;
+  background: var(--wb-agent-hue);
+  transition: width 0.3s linear;
+}
+
+/* ---------- row 4: metrics ---------- */
+
+.wb-agent-metrics {
+  flex: none;
+  display: flex;
+  align-items: baseline;
+  gap: var(--wb-s2);
+  font-family: var(--wb-mono);
+  /* 10px, not the row's 11px: the whole line must fit 260px without ellipsising the cost */
+  font-size: var(--wb-t1);
+  color: var(--wb-text-3);
+  font-variant-numeric: tabular-nums;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.wb-agent-pct {
+  flex: none;
+  font-family: var(--wb-mono);
+  font-size: var(--wb-t2);
+  font-variant-numeric: tabular-nums;
+  color: var(--wb-agent-hue);
+}
+
+/* ---------- row 5: ghost buttons, GitHub badge geometry ---------- */
+
+.wb-agent-actions {
+  margin-top: auto;
+  display: flex;
+  gap: var(--wb-s2);
+  flex: none;
+}
+
+.wb-agent-btn {
+  font-family: inherit;
+  height: 18px;
+  padding: 0 6px;
+  border-radius: 10px;
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  text-transform: uppercase;
+  border: 1px solid var(--wb-border-2);
+  background: transparent;
+  color: var(--wb-text-2);
+  cursor: pointer;
+  white-space: nowrap;
+}
+.wb-agent-btn:hover:not(:disabled) {
+  color: var(--wb-text);
+  border-color: var(--wb-text-3);
+  background: var(--wb-island-2);
+}
+.wb-agent-btn:disabled {
+  opacity: 0.45;
+  cursor: default;
+}
+
+/* ---------- the ring (same mechanism as the plan node) ---------- */
+
+.wb-agent.running::after,
+.wb-agent.waiting::after {
+  content: '';
+  position: absolute;
+  inset: -3px;
+  border-radius: 11px;
+  z-index: -1;
+  background: conic-gradient(
+    from var(--wb-angle),
+    var(--ring) 0 20%,
+    color-mix(in srgb, var(--ring) 20%, transparent) 35% 65%,
+    var(--ring) 90% 100%
+  );
+}
+.wb-agent.running::after {
+  --ring: var(--wb-working);
+  animation: wb-rotate 1.5s linear infinite;
+}
+.wb-agent.waiting::after {
+  --ring: var(--wb-blocked);
+  animation: wb-rotate 4.5s linear infinite;
+}
+@media (prefers-reduced-motion: reduce) {
+  .wb-agent.running::after,
+  .wb-agent.waiting::after {
+    animation: none;
+  }
+}

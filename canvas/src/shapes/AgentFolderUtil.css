@@ -1,0 +1,184 @@
+/*
+ * `agent-folder` chrome (plan B.6), drawn the ComfyUI way: the title strip carries its own
+ * 0.25-alpha fill and the body carries a second 0.25-alpha fill over the whole shape, so the
+ * header comes out darker for free; the border is the same hue at full alpha and the title text
+ * is the folder's own colour.
+ *
+ * `--wb-folder-hue` is set inline from the agent's status colour.
+ */
+
+.wb-folder {
+  /* deliberately no z-index / opacity / transform / filter here: this element must NOT open a
+     stacking context, or the conic ring the card uses (and any future folder ring) would paint
+     in front of the shape instead of behind it. */
+  position: relative;
+  box-sizing: border-box;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  border-radius: var(--wb-r4);
+  /* the body fill: hue at 0.25 alpha over the island */
+  background: color-mix(in srgb, var(--wb-folder-hue) 25%, var(--wb-island));
+  border: 1.5px solid var(--wb-folder-hue);
+  font-family: var(--wb-font);
+  color: var(--wb-text);
+}
+
+.wb-folder-head {
+  display: flex;
+  align-items: center;
+  gap: var(--wb-s3);
+  height: 36px;
+  flex: none;
+  padding: 0 var(--wb-s4);
+  box-sizing: border-box;
+  /* the title strip's own 0.25-alpha fill, under the body fill above: a darker header for free */
+  background: color-mix(in srgb, var(--wb-folder-hue) 25%, transparent);
+  border-bottom: 1px solid color-mix(in srgb, var(--wb-folder-hue) 45%, transparent);
+  user-select: none;
+}
+
+.wb-folder.collapsed .wb-folder-head {
+  border-bottom: none;
+}
+
+.wb-folder-chevron {
+  font: inherit;
+  font-size: var(--wb-t3);
+  line-height: 1;
+  width: 18px;
+  height: 18px;
+  flex: none;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0;
+  border: none;
+  border-radius: var(--wb-r2);
+  background: transparent;
+  color: var(--wb-folder-hue);
+  cursor: pointer;
+}
+.wb-folder-chevron:hover {
+  background: color-mix(in srgb, var(--wb-folder-hue) 25%, transparent);
+}
+
+/* title text in the folder's own colour (ComfyUI) */
+.wb-folder-title {
+  font-size: var(--wb-t4);
+  font-weight: 600;
+  color: var(--wb-folder-hue);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* GitHub CheckStep-badge geometry (B.1 item 14) */
+.wb-folder-pill {
+  display: inline-flex;
+  align-items: center;
+  height: 18px;
+  flex: none;
+  border-radius: 10px;
+  padding: 0 6px;
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  text-transform: uppercase;
+  color: #1b1b1b;
+  background: var(--wb-folder-hue);
+}
+
+.wb-folder-node {
+  margin-left: auto;
+  font-size: var(--wb-t2);
+  color: var(--wb-text-2);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.wb-folder-body {
+  flex: 1 1 auto;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  gap: var(--wb-s3);
+  padding: var(--wb-s4);
+  overflow: hidden;
+}
+
+.wb-folder-section {
+  display: flex;
+  flex-direction: column;
+  gap: var(--wb-s1);
+  min-height: 0;
+  flex: 1 1 auto;
+}
+
+.wb-folder-label {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--wb-s3);
+  font-size: var(--wb-t1);
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  text-transform: uppercase;
+  color: var(--wb-text-3);
+}
+
+.wb-folder-text,
+.wb-folder-pre {
+  box-sizing: border-box;
+  flex: 1 1 auto;
+  min-height: 42px;
+  margin: 0;
+  padding: var(--wb-s3);
+  border: 1px solid var(--wb-border-2);
+  border-radius: var(--wb-r2);
+  background: var(--wb-island);
+  color: var(--wb-text);
+  font-family: var(--wb-mono);
+  font-size: var(--wb-t2);
+  line-height: 1.35;
+  resize: none;
+  overflow: auto;
+  white-space: pre;
+}
+
+.wb-folder-text:focus {
+  outline: 2px solid var(--wb-selection);
+  outline-offset: -1px;
+}
+
+.wb-folder-pre {
+  color: var(--wb-text-2);
+}
+
+.wb-folder-btn {
+  font: inherit;
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  text-transform: uppercase;
+  height: 18px;
+  padding: 0 6px;
+  border: 1px solid var(--wb-border-2);
+  border-radius: 10px;
+  background: var(--wb-island);
+  color: var(--wb-text-2);
+  cursor: pointer;
+}
+.wb-folder-btn:hover {
+  color: var(--wb-text);
+  border-color: var(--wb-text-3);
+}
+
+.wb-folder-error {
+  flex: none;
+  font-size: var(--wb-t2);
+  line-height: 1.3;
+  color: var(--wb-blocked);
+  word-break: break-word;
+}
