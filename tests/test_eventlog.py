@@ -232,6 +232,50 @@ def test_answer_unknown_prompt_raises(path: Path) -> None:
         log.create_prompt("agent-a", "bad kind", kind="menu")
 
 
+def test_unresolved(path: Path) -> None:
+    log = EventLog(path)
+    log.load()
+
+    def propose(rid: str, name: str) -> None:
+        log.append(agent_id="root", node_id=None, type="diagram_proposed", note=name,
+                   data={"request_id": rid, "name": name})
+
+    propose("aaaa1111", "hld")
+    propose("bbbb2222", "lld")
+    propose("cccc3333", "er")
+    log.append(agent_id="user", node_id=None, type="diagram_approved", note="",
+               data={"request_id": "aaaa1111"})
+    log.append(agent_id="user", node_id=None, type="diagram_rejected", note="",
+               data={"request_id": "cccc3333"})
+    # unrelated request/decision pairs and events without a request_id are ignored
+    log.append(agent_id="root", node_id=None, type="dispatch_proposed", note="",
+               data={"request_id": "dddd4444"})
+    log.append(agent_id="agent-a", node_id=None, type="info", note="no request id")
+
+    settled = ("diagram_approved", "diagram_rejected")
+    assert [e.data["request_id"] for e in log.unresolved("diagram_proposed", settled)] == ["bbbb2222"]
+    assert [e.data["request_id"] for e in log.unresolved("dispatch_proposed",
+                                                         ("dispatch_approved", "dispatch_rejected"))] == ["dddd4444"]
+    # a bare string settled type is accepted too
+    assert [e.data["request_id"] for e in log.unresolved("diagram_proposed", "diagram_approved")] == [
+        "bbbb2222", "cccc3333"
+    ]
+    # the latest proposal of a re-proposed request wins, and events stay in seq order
+    propose("bbbb2222", "lld v2")
+    propose("eeee5555", "hld v2")
+    still_open = log.unresolved("diagram_proposed", settled)
+    assert [e.data["request_id"] for e in still_open] == ["bbbb2222", "eeee5555"]
+    assert still_open[0].note == "lld v2" and [e.seq for e in still_open] == sorted(e.seq for e in still_open)
+
+    # it is derived from the file, so a fresh log (a restart) sees the same thing
+    fresh = EventLog(path)
+    fresh.load()
+    assert [e.data["request_id"] for e in fresh.unresolved("diagram_proposed", settled)] == [
+        "bbbb2222", "eeee5555"
+    ]
+    assert log.unresolved("plan_pasted", settled) == []
+
+
 def test_ring_bounded(path: Path) -> None:
     log = EventLog(path, ring=5)
     log.load()
