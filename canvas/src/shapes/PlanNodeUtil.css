@@ -1,0 +1,227 @@
+/*
+ * `plan-node` shape chrome (plan B.3). The box is 200x64; the label hangs BELOW it at 2x width
+ * (n8n's rule) so long titles never perturb the graph's geometry.
+ *
+ * Running = a rotating conic-gradient ring at 1.5s (n8n); blocked/waiting = the same ring at
+ * 4.5s — one mechanism, two meanings.
+ */
+
+@property --wb-angle {
+  syntax: '<angle>';
+  initial-value: 0deg;
+  inherits: false;
+}
+
+@keyframes wb-rotate {
+  to {
+    --wb-angle: 360deg;
+  }
+}
+
+/* ---------- box ---------- */
+
+.wb-node {
+  /* `position: relative` with `z-index: auto` deliberately does NOT open a stacking context:
+     that is what lets the `z-index: -1` ring below paint *behind* this element's background
+     rather than on top of it. */
+  position: relative;
+  box-sizing: border-box;
+  display: flex;
+  align-items: center;
+  overflow: visible;
+  border-radius: var(--wb-r3);
+  background: var(--wb-island);
+  border: 1.5px solid var(--wb-border-2);
+  font-family: var(--wb-font);
+  color: var(--wb-text);
+  /* zoom-adaptive border alpha (0.1 -> 0.7 as zoom 1.0 -> 0.2, gamma 2.2) */
+  --wb-border-alpha: 0.1;
+}
+
+/* board hue: hex fallback declared before every oklch() use */
+.wb-node[data-type='hld'] { --wb-accent-hex: var(--wb-hld-hex); --wb-accent: var(--wb-hld); }
+.wb-node[data-type='lld'] { --wb-accent-hex: var(--wb-lld-hex); --wb-accent: var(--wb-lld); }
+.wb-node[data-type='er']  { --wb-accent-hex: var(--wb-er-hex);  --wb-accent: var(--wb-er); }
+
+.wb-node-stripe {
+  position: absolute;
+  left: 0;
+  top: 0;
+  bottom: 0;
+  width: 4px;
+  border-radius: var(--wb-r3) 0 0 var(--wb-r3);
+  background: var(--wb-accent-hex);
+  background: var(--wb-accent);
+}
+
+.wb-node-type {
+  margin-left: var(--wb-s6);
+  font-size: var(--wb-t1);
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  text-transform: uppercase;
+  color: var(--wb-accent-hex);
+  color: var(--wb-accent);
+}
+
+/* ---------- label below the box, 2x width (n8n) ---------- */
+
+.wb-node-label {
+  position: absolute;
+  top: 100%;
+  left: 50%;
+  transform: translateX(-50%);
+  margin-top: var(--wb-s4);
+  min-width: 200%;
+  text-align: center;
+  pointer-events: none;
+}
+
+.wb-node-title {
+  font-size: var(--wb-t5);
+  font-weight: 500;
+  line-height: 1.25;
+  color: var(--wb-text);
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+  word-break: break-word;
+}
+
+.wb-node-sub {
+  font-size: var(--wb-t2);
+  line-height: 1.3;
+  color: var(--wb-text-3);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* ---------- status marks inside the box (n8n: only ever one shows) ---------- */
+
+.wb-node-status {
+  position: absolute;
+  bottom: 6px;
+  right: 6px;
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+  background: var(--wb-idle);
+}
+.wb-node[data-status='in_progress'] .wb-node-status { background: var(--wb-working); }
+.wb-node[data-status='blocked'] .wb-node-status { background: var(--wb-blocked); }
+.wb-node[data-status='done'] .wb-node-status { background: var(--wb-done); }
+/* n8n: only ever one status mark shows inside the box */
+.wb-node.done .wb-node-status,
+.wb-node.ready .wb-node-status { display: none; }
+
+/* GitHub CheckStep-badge geometry (B.1 item 14) */
+.wb-badge {
+  position: absolute;
+  top: 6px;
+  right: 6px;
+  display: inline-flex;
+  align-items: center;
+  height: 18px;
+  border-radius: 10px;
+  padding: 0 6px;
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  text-transform: uppercase;
+  background: var(--wb-ready);
+  color: #fff;
+}
+
+.wb-node-check {
+  position: absolute;
+  top: 6px;
+  right: 8px;
+  font-size: var(--wb-t4);
+  line-height: 1;
+  font-weight: 700;
+  color: var(--wb-done);
+}
+
+/* ---------- per-status table (B.3) ---------- */
+
+.wb-node.undispatched {
+  border: 1.5px dashed var(--wb-idle);
+  border-color: color-mix(in srgb, var(--wb-text) calc(var(--wb-border-alpha) * 100%), var(--wb-idle));
+  background: transparent;
+}
+
+.wb-node.idle {
+  border: 1.5px solid var(--wb-idle);
+  border-color: color-mix(in srgb, var(--wb-text) calc(var(--wb-border-alpha) * 100%), var(--wb-idle));
+}
+
+.wb-node.ready {
+  border: 2px solid var(--wb-ready);
+  background: transparent;
+}
+
+.wb-node.running {
+  border: 2px solid var(--wb-working);
+  background: var(--wb-island);
+}
+
+.wb-node.waiting {
+  border: 2px solid var(--wb-blocked);
+  background: var(--wb-island);
+}
+
+.wb-node.done {
+  border: 2px solid var(--wb-done);
+  background: color-mix(in srgb, var(--wb-done) 8%, var(--wb-island));
+}
+
+/* ---------- the ring ---------- */
+
+.wb-node.running::after,
+.wb-node.waiting::after {
+  content: '';
+  position: absolute;
+  inset: -3px;
+  border-radius: 11px;
+  z-index: -1;
+  background: conic-gradient(
+    from var(--wb-angle),
+    var(--ring) 0 20%,
+    color-mix(in srgb, var(--ring) 20%, transparent) 35% 65%,
+    var(--ring) 90% 100%
+  );
+}
+.wb-node.running::after {
+  --ring: var(--wb-working);
+  animation: wb-rotate 1.5s linear infinite;
+}
+.wb-node.waiting::after {
+  --ring: var(--wb-blocked);
+  animation: wb-rotate 4.5s linear infinite;
+}
+@media (prefers-reduced-motion: reduce) {
+  .wb-node.running::after,
+  .wb-node.waiting::after {
+    animation: none;
+  }
+}
+
+/* ---------- degrade to a dot below zoom 0.25 (Dagster) ---------- */
+
+.wb-node-dot {
+  position: absolute;
+  left: 50%;
+  top: 50%;
+  width: 10px;
+  height: 10px;
+  margin: -5px 0 0 -5px;
+  border-radius: 50%;
+  background: var(--wb-idle);
+}
+.wb-node-dot[data-status='in_progress'] { background: var(--wb-working); }
+.wb-node-dot[data-status='blocked'] { background: var(--wb-blocked); }
+.wb-node-dot[data-status='done'] { background: var(--wb-done); }
+.wb-node-dot[data-ready='true'] { background: var(--wb-ready); }

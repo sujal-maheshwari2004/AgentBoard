@@ -1,6 +1,7 @@
 import json
 from pathlib import Path
 
+from whiteboard.agents_install import AGENT_NAMES, STAMP_PREFIX, render_agent_definition
 from whiteboard.scaffold import GITIGNORE_LINES, TEMPLATES_DIR, merge_settings, scaffold
 
 EXPECTED_FILES = [
@@ -134,6 +135,73 @@ def test_merge_settings_unit() -> None:
     once = merge_settings({"hooks": "garbage"}, template)
     assert once["hooks"] == template["hooks"]
     assert merge_settings(once, template) == once
+
+
+def test_scaffold_returns_agent_states_and_inbound(tmp_path: Path) -> None:
+    result = scaffold(tmp_path)
+    assert result["agents"] == {name: "installed" for name in AGENT_NAMES}
+    assert result["cross_session_inbound"] == "accept"
+    assert result["settings_path"] == str((tmp_path / ".claude" / "settings.local.json").resolve())
+    assert _settings(tmp_path)["crossSessionInbound"] == "accept"
+
+    again = scaffold(tmp_path)
+    assert again["agents"] == {name: "unchanged" for name in AGENT_NAMES}
+    assert again["cross_session_inbound"] == "accept"
+
+
+def test_scaffolded_agent_definitions_are_stamped_copies(tmp_path: Path) -> None:
+    scaffold(tmp_path)
+    for name in AGENT_NAMES:
+        path = tmp_path / ".claude" / "agents" / f"{name}.md"
+        assert not path.is_symlink()
+        assert path.read_text() == render_agent_definition(name)
+        assert STAMP_PREFIX in path.read_text()
+
+
+def test_rescaffold_refreshes_stale_agent_definition(tmp_path: Path) -> None:
+    """A v1 project (or one built before a template change) self-heals on re-scaffold."""
+    scaffold(tmp_path)
+    path = tmp_path / ".claude" / "agents" / "whiteboard-task.md"
+    stale = path.read_text().replace("sha256=", "sha256=0")
+    path.write_text(stale)
+
+    result = scaffold(tmp_path)  # no force
+    assert result["agents"]["whiteboard-task"] == "refreshed"
+    assert result["agents"]["whiteboard-liaison"] == "unchanged"
+    assert ".claude/agents/whiteboard-task.md" in result["created"]
+    assert ".claude/agents/whiteboard-liaison.md" in result["skipped"]
+    assert path.read_text() == render_agent_definition("whiteboard-task")
+
+
+def test_hand_edited_agent_definition_is_preserved(tmp_path: Path) -> None:
+    scaffold(tmp_path)
+    path = tmp_path / ".claude" / "agents" / "whiteboard-task.md"
+    mine = "---\nname: whiteboard-task\n---\nmy own rules\n"
+    path.write_text(mine)
+
+    result = scaffold(tmp_path)
+    assert result["agents"]["whiteboard-task"] == "user-modified"
+    assert ".claude/agents/whiteboard-task.md" in result["skipped"]
+    assert path.read_text() == mine
+
+    forced = scaffold(tmp_path, force=True)
+    assert forced["agents"]["whiteboard-task"] == "refreshed"
+    assert path.read_text() == render_agent_definition("whiteboard-task")
+
+
+def test_scaffolded_task_agent_mentions_v2_protocol(tmp_path: Path) -> None:
+    scaffold(tmp_path)
+    task = (tmp_path / ".claude" / "agents" / "whiteboard-task.md").read_text()
+    for token in ("report_progress", "chat_reply", "write_agent_plan", "write_agent_diagram",
+                  "ack_event_seq"):
+        assert token in task, token
+    assert "if the `mcp__whiteboard__*` tools are not available" in task.lower()
+    liaison = (tmp_path / ".claude" / "agents" / "whiteboard-liaison.md").read_text()
+    assert "chat_reply" in liaison and "report_progress" in liaison
+    collab = (tmp_path / ".whiteboard" / "COLLABORATION.md").read_text()
+    for token in ("## 4. Progress reporting", "## 6. Chat threads",
+                  "## 7. Mid-run plan edits and acknowledgement", "write_agent_diagram"):
+        assert token in collab, token
 
 
 def test_gitignore_lines_appended_once_without_clobbering(tmp_path: Path) -> None:

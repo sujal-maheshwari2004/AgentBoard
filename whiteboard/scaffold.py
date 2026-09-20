@@ -9,6 +9,12 @@ import copy
 import json
 from pathlib import Path
 
+from whiteboard.agents_install import (
+    AGENT_NAMES,
+    installed_state,
+    render_agent_definition,
+)
+
 TEMPLATES_DIR: Path = Path(__file__).resolve().parent.parent / "templates"
 
 GITIGNORE_LINES: tuple[str, ...] = (
@@ -28,8 +34,6 @@ _WHITEBOARD_FILES: tuple[tuple[str, str | None], ...] = (
     (".whiteboard/plan/nodes/.gitkeep", None),
     (".whiteboard/agents/.gitkeep", None),
     (".whiteboard/events.jsonl", None),
-    (".claude/agents/whiteboard-task.md", "agents/whiteboard-task.md"),
-    (".claude/agents/whiteboard-liaison.md", "agents/whiteboard-liaison.md"),
 )
 
 
@@ -99,8 +103,38 @@ def _write_file(path: Path, content: str) -> None:
     path.write_text(content, encoding="utf-8")
 
 
+def _scaffold_agent_definitions(
+    root: Path, *, force: bool, created: list[str], skipped: list[str]
+) -> dict[str, str]:
+    """Write `<root>/.claude/agents/*.md` as stamped copies of the templates.
+
+    Unlike the plain template files these are refreshed whenever the stamp's hash no longer
+    matches (so a v1 project self-heals on re-scaffold), and a definition without a stamp is
+    reported as `user-modified` and left exactly as it is unless `force`.
+    """
+    states: dict[str, str] = {}
+    for name in AGENT_NAMES:
+        rel = f".claude/agents/{name}.md"
+        dest = root / rel
+        wanted = render_agent_definition(name)
+        state = installed_state(dest, wanted)
+        if state == "unchanged" or (state == "user-modified" and not force):
+            states[name] = "unchanged" if state == "unchanged" else "user-modified"
+            skipped.append(rel)
+            continue
+        if dest.is_symlink():
+            dest.unlink()
+        _write_file(dest, wanted)
+        states[name] = "installed" if state == "missing" else "refreshed"
+        created.append(rel)
+    return states
+
+
 def scaffold(root: Path, *, force: bool = False) -> dict:
-    """Populate `<root>/.whiteboard/` and `<root>/.claude/`; returns {created, skipped}."""
+    """Populate `<root>/.whiteboard/` and `<root>/.claude/`.
+
+    Returns `{created, skipped, agents, cross_session_inbound, settings_path}`.
+    """
     root = Path(root).resolve()
     created: list[str] = []
     skipped: list[str] = []
@@ -112,6 +146,8 @@ def scaffold(root: Path, *, force: bool = False) -> dict:
             continue
         _write_file(dest, _template(template_name) if template_name else "")
         created.append(rel)
+
+    agents = _scaffold_agent_definitions(root, force=force, created=created, skipped=skipped)
 
     settings_path = root / ".claude" / "settings.local.json"
     settings_rel = ".claude/settings.local.json"
@@ -137,4 +173,10 @@ def scaffold(root: Path, *, force: bool = False) -> dict:
     else:
         skipped.append(".gitignore")
 
-    return {"created": created, "skipped": skipped}
+    return {
+        "created": created,
+        "skipped": skipped,
+        "agents": agents,
+        "cross_session_inbound": merged.get("crossSessionInbound"),
+        "settings_path": str(settings_path),
+    }

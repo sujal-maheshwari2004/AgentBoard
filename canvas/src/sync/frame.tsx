@@ -50,9 +50,9 @@ function FrameButton({ editor, frame }: { editor: Editor; frame: TLFrameShape })
         display: 'flex',
         alignItems: 'center',
         gap: 6,
-        fontFamily: 'system-ui, sans-serif',
+        fontFamily: 'var(--wb-font)',
         fontSize: 13,
-        color: '#202124',
+        color: 'var(--wb-text)',
         userSelect: 'none',
       }}
     >
@@ -68,9 +68,10 @@ function FrameButton({ editor, frame }: { editor: Editor; frame: TLFrameShape })
           font: 'inherit',
           lineHeight: 1,
           padding: '3px 8px',
-          border: '1px solid #bdc1c6',
-          borderRadius: 4,
-          background: '#fff',
+          border: '1px solid var(--wb-border-2)',
+          borderRadius: 'var(--wb-r2)',
+          background: 'var(--wb-island)',
+          color: 'var(--wb-text)',
           cursor: 'pointer',
         }}
       >

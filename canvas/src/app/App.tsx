@@ -1,6 +1,9 @@
 import { useCallback, useMemo, useState } from 'react'
 import { Tldraw, type Editor, type TLComponents } from 'tldraw'
 import { AgentCardUtil } from '../shapes/AgentCardUtil'
+import { PlanNodeUtil } from '../shapes/PlanNodeUtil'
+import { WbShapeWrapper } from '../shapes/ShapeWrapper'
+import { installZoomTracking } from '../sync/apply'
 import { FrameChrome, getShapeVisibility } from '../sync/frame'
 import { mountWiring } from '../sync/wire'
 import { ChatBox } from '../panels/ChatBox'
@@ -11,8 +14,8 @@ import { RiskyEditConfirm } from '../panels/RiskyEditConfirm'
 import { Toolbar } from '../panels/Toolbar'
 import '../panels/panels.css'
 
-const shapeUtils = [AgentCardUtil]
-const components: TLComponents = { ContextMenu: null, OnTheCanvas: FrameChrome }
+const shapeUtils = [AgentCardUtil, PlanNodeUtil]
+const components: TLComponents = { ContextMenu: null, OnTheCanvas: FrameChrome, ShapeWrapper: WbShapeWrapper }
 
 export function App() {
   const [editor, setEditor] = useState<Editor | null>(null)
@@ -21,21 +24,30 @@ export function App() {
     // StrictMode mounts twice: each mount gets its own wiring and the returned cleanup tears it
     // down (socket closedRef, listeners), so a late-opening socket from the first pass never leaks.
     const wiring = mountWiring(ed)
+    const stopZoom = installZoomTracking(ed)
     setEditor(ed)
     ed.setCurrentTool('select')
     return () => {
+      stopZoom()
       wiring.dispose()
       setEditor((cur) => (cur === ed ? null : cur))
     }
   }, [])
 
   const options = useMemo(() => ({ maxPages: 1 }), [])
+  // an explicit `data-theme` on <html> wins for tldraw too; otherwise it follows the OS, exactly
+  // as the `prefers-color-scheme` block in tokens.css does
+  const colorScheme = useMemo<'light' | 'dark' | 'system'>(() => {
+    const t = document.documentElement.dataset.theme
+    return t === 'dark' || t === 'light' ? t : 'system'
+  }, [])
 
   return (
     <div className="wb-root">
       <div className="wb-canvas">
         <Tldraw
           hideUi
+          colorScheme={colorScheme}
           components={components}
           shapeUtils={shapeUtils}
           getShapeVisibility={getShapeVisibility}

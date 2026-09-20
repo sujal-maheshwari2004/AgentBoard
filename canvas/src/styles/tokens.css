@@ -1,0 +1,64 @@
+/*
+ * Whiteboard v2 design tokens (plan B.2). Hand-written CSS custom properties — no Tailwind,
+ * no build-chain additions: `dist/` is committed and served by the Python server.
+ *
+ * Board/type hues follow Langfuse: one lightness, one chroma, hue only, so no board outranks
+ * another. Status colours are the Geist 700 step, which is byte-identical in light and dark and
+ * is therefore deliberately ABSENT from the dark block below — status marks must not change.
+ *
+ * Every `oklch()` is preceded by its `-hex` fallback in the consuming rule:
+ *   color: var(--wb-hld-hex); color: var(--wb-hld);
+ *
+ * Theme: `<html data-theme="light|dark">` wins; with no attribute `prefers-color-scheme` decides.
+ */
+
+:root {
+  /* surfaces */
+  --wb-canvas:        #f5f5f5;   --wb-grid:      #d9d9d9;
+  --wb-island:        #ffffff;   --wb-island-2:  #fafafa;
+  --wb-border:        #e5e5e5;   --wb-border-2:  #d4d4d4;
+  /* text */
+  --wb-text:          #171717;   --wb-text-2:    #525252;   --wb-text-3:  #8f8f8f;
+  /* status — theme-invariant (Geist 700) */
+  --wb-idle:          #8f8f8f;   --wb-working:   #ffb224;
+  --wb-blocked:       #e5484d;   --wb-done:      #45a557;   --wb-ready:   #0072f5;
+  /* boards: oklch(68% .18 H) */
+  --wb-hld: oklch(68% .18 265);  --wb-hld-hex: #5a8dee;
+  --wb-lld: oklch(68% .18 310);  --wb-lld-hex: #b06fd8;
+  --wb-er:  oklch(68% .18 145);  --wb-er-hex:  #34a06a;
+  --wb-selection:     #0072f5;
+  /* spacing / radii / shadow / type */
+  --wb-s1:2px; --wb-s2:4px; --wb-s3:6px; --wb-s4:8px; --wb-s5:12px;
+  --wb-s6:16px; --wb-s7:20px; --wb-s8:24px; --wb-s9:32px; --wb-s10:48px;
+  --wb-r1:2px; --wb-r2:4px; --wb-r3:8px; --wb-r4:12px; --wb-r-pill:999px;
+  --wb-shadow-1: 0 1px 2px rgba(0,0,0,.06), 0 1px 3px rgba(0,0,0,.10);
+  --wb-shadow-2: 0 4px 12px rgba(0,0,0,.10), 0 2px 4px rgba(0,0,0,.06);
+  --wb-font: ui-sans-serif, -apple-system, "Segoe UI", Inter, system-ui, sans-serif;
+  --wb-mono: ui-monospace, SFMono-Regular, "SF Mono", Menlo, monospace;
+  --wb-t1:10px; --wb-t2:11px; --wb-t3:12px; --wb-t4:13px; --wb-t5:14px; --wb-t6:16px; --wb-t7:20px;
+}
+
+:root[data-theme="dark"] {
+  --wb-canvas:#171717; --wb-grid:#3a3a3a; --wb-island:#1e1e1e; --wb-island-2:#252525;
+  --wb-border:#323232; --wb-border-2:#3f3f3f;
+  --wb-text:#ededed; --wb-text-2:#a8a8a8; --wb-text-3:#6f6f6f;
+  --wb-hld: oklch(75% .12 265); --wb-hld-hex:#89aef2;
+  --wb-lld: oklch(75% .12 310); --wb-lld-hex:#cb9ae2;
+  --wb-er:  oklch(75% .12 145); --wb-er-hex:#6cbf92;
+  --wb-shadow-1: 0 1px 2px rgba(0,0,0,.4); --wb-shadow-2: 0 4px 14px rgba(0,0,0,.5);
+}
+
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --wb-canvas:#171717; --wb-grid:#3a3a3a; --wb-island:#1e1e1e; --wb-island-2:#252525;
+    --wb-border:#323232; --wb-border-2:#3f3f3f;
+    --wb-text:#ededed; --wb-text-2:#a8a8a8; --wb-text-3:#6f6f6f;
+    --wb-hld: oklch(75% .12 265); --wb-hld-hex:#89aef2;
+    --wb-lld: oklch(75% .12 310); --wb-lld-hex:#cb9ae2;
+    --wb-er:  oklch(75% .12 145); --wb-er-hex:#6cbf92;
+    --wb-shadow-1: 0 1px 2px rgba(0,0,0,.4); --wb-shadow-2: 0 4px 14px rgba(0,0,0,.5);
+  }
+}
+
+/* tldraw's own surface follows the canvas token so the board and the islands agree */
+.tl-background { background-color: var(--wb-canvas); }
