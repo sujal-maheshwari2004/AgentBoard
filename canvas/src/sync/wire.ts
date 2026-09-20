@@ -7,17 +7,21 @@ import {
   applyLayout,
   applySnapshot,
   deleteAgent,
+  deleteAgentFolder,
   deleteEdge,
   deleteNode,
   ensureBoardFrames,
+  folderLayout,
   nodeContext,
+  onFolderCollapse,
   refreshAgents,
   relayoutLocal,
-  upsertAgent,
+  upsertAgentAndFolder,
   upsertEdge,
   upsertNodeFromState,
 } from './apply'
 import { isBoardName, onBoardReparent, splitLayoutByBoard } from './boards'
+import { diagramEditPayload, planEditPayload } from '../shapes/agentFolder'
 import { installCollector } from './collect'
 import { onFrameCollapse } from './frame'
 
@@ -29,6 +33,9 @@ export interface Wiring {
   sendLayout(patch: LayoutPatch, board?: string): void
   setBoard(board: string): void
   setNodeStatus(id: string, status: NodeStatus): void
+  /** B.6 folder editors; both return the seq so the sender can match an `edit.reject` */
+  editAgentPlan(agentId: string, planMd: string): number
+  editAgentDiagram(agentId: string, mermaid: string): number
   relayout(): void
   /** re-apply the last known server truth (used after a rejected edit) */
   resync(): void
@@ -64,12 +71,20 @@ function applyMessage(editor: Editor, s: Store, msg: ServerMessage): void {
       deleteEdge(editor, msg.payload.src, msg.payload.dst)
       break
     case 'agent.card.upsert': {
-      const l = layout[state.activeBoard]?.agents?.[msg.payload.agent.id]
-      upsertAgent(editor, msg.payload.agent, nodeContext(nodes), l ? { x: l.x, y: l.y, w: l.w, h: l.h } : undefined)
+      const agent = msg.payload.agent
+      const l = layout[state.activeBoard]?.agents?.[agent.id]
+      upsertAgentAndFolder(
+        editor,
+        agent,
+        nodeContext(nodes),
+        l ? { x: l.x, y: l.y, w: l.w, h: l.h } : undefined,
+        folderLayout(layout, agent.id),
+      )
       break
     }
     case 'agent.card.delete':
       deleteAgent(editor, msg.payload.id)
+      deleteAgentFolder(editor, msg.payload.id)
       break
     case 'layout.update':
       // the active board is what `canvas.layout` / `plan.relayout` name, so it is what we apply
@@ -139,6 +154,8 @@ export function mountWiring(editor: Editor, s: Store = store, url: string = sock
     onLayout: sendLayout,
   })
   const offCollapse = onFrameCollapse((board, patch) => sendLayout(patch, board))
+  // B.6: `frames['<agent-id>'].collapsed`, persisted on the board that owns the folder
+  const offFolderCollapse = onFolderCollapse((board, patch) => sendLayout(patch, board))
   const offReparent = onBoardReparent((board, patch) => sendLayout(patch, board))
 
   const wiring: Wiring = {
@@ -152,6 +169,12 @@ export function mountWiring(editor: Editor, s: Store = store, url: string = sock
     setNodeStatus(id, status) {
       socket.send('node.status', { id, status })
     },
+    editAgentPlan(agentId, planMd) {
+      return socket.send('agent.plan.edit', planEditPayload(agentId, planMd))
+    },
+    editAgentDiagram(agentId, mermaid) {
+      return socket.send('agent.diagram.edit', diagramEditPayload(agentId, mermaid))
+    },
     relayout() {
       const state = s.getState()
       socket.send('plan.relayout', { diagram: state.activeBoard })
@@ -161,6 +184,7 @@ export function mountWiring(editor: Editor, s: Store = store, url: string = sock
     dispose() {
       offCollector()
       offCollapse()
+      offFolderCollapse()
       offReparent()
       socket.close()
       if (current === wiring) current = null

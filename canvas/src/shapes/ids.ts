@@ -1,13 +1,14 @@
 // Stable tldraw ids derived from plan ids (research doc: "Stable ids").
 //   n_<nodeId>          plan node (geo)
 //   a_<agentId>         agent card (custom shape)
-//   f_<name>            frame
+//   f_<name>            frame (board frames: `f_board-hld`)
+//   g_<agentId>         agent folder (B.6 — a new prefix; `f_`'s parse is pinned by ids.test.ts)
 //   e_<src>__<dst>      edge arrow
 //   b_<src>__<dst>_<terminal>  arrow binding
 // Plan ids match ^(node|agent)-[a-z0-9][a-z0-9-]*$ so `__` and `_` are safe separators.
 import { createBindingId, createShapeId, type JsonObject, type TLBindingId, type TLShapeId } from 'tldraw'
 
-export type ShapeKind = 'plan-node' | 'agent-card' | 'plan-frame' | 'edge'
+export type ShapeKind = 'plan-node' | 'agent-card' | 'plan-frame' | 'edge' | 'agent-folder'
 
 export const PLAN_FRAME_NAME = 'plan-board'
 export const PLAN_FRAME_TITLE = 'Plan board'
@@ -20,6 +21,10 @@ export function agentShapeId(id: string): TLShapeId {
 }
 export function frameShapeId(name: string = PLAN_FRAME_NAME): TLShapeId {
   return createShapeId(`f_${name}`)
+}
+/** B.6 agent folder: `shape:g_agent-parser`. Deliberately NOT `f_`. */
+export function folderShapeId(agentId: string): TLShapeId {
+  return createShapeId(`g_${agentId}`)
 }
 export function edgeShapeId(src: string, dst: string): TLShapeId {
   return createShapeId(`e_${src}__${dst}`)
@@ -55,6 +60,8 @@ export function parseShapeId(shapeId: string): ParsedShapeId | null {
       return { kind: 'agent-card', id }
     case 'f':
       return { kind: 'plan-frame', id }
+    case 'g':
+      return { kind: 'agent-folder', id }
     case 'e': {
       const pair = parseEdgeKey(id)
       if (!pair) return null
