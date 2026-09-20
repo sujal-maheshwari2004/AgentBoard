@@ -23,8 +23,11 @@ __all__ = [
     "PlanPaste",
     "PromptReply",
     "DispatchReply",
+    "DiagramReply",
     "RiskyEditReply",
     "PlanRelayout",
+    "AgentPlanEdit",
+    "AgentDiagramEdit",
     "parse_client_message",
     "CLIENT_MESSAGE_TYPES",
 ]
@@ -68,6 +71,10 @@ class ChatPayload(_Payload):
     text: str
     agentId: str | None = None
     nodeId: str | None = None
+    #: The thread this line belongs to; defaults to the addressee (CONTRACTS §6).
+    thread: str | None = None
+    #: The ``chat.message`` id this line answers (``chat-<seq>``).
+    reply_to: str | None = None
 
 
 class PastePayload(_Payload):
@@ -83,6 +90,24 @@ class DispatchReplyPayload(_Payload):
     request_id: str
     approved: bool
     note: str | None = None
+
+
+class DiagramReplyPayload(_Payload):
+    request_id: str
+    approved: bool
+    note: str = ""
+    #: The owner's edited mermaid; ``None`` approves the proposal as proposed.
+    mermaid: str | None = None
+
+
+class AgentPlanEditPayload(_Payload):
+    agent_id: str
+    plan_md: str
+
+
+class AgentDiagramEditPayload(_Payload):
+    agent_id: str
+    mermaid: str
 
 
 class RiskyEditReplyPayload(_Payload):
@@ -145,6 +170,21 @@ class DispatchReply(_Envelope):
     payload: DispatchReplyPayload
 
 
+class DiagramReply(_Envelope):
+    type: Literal["diagram.reply"]
+    payload: DiagramReplyPayload
+
+
+class AgentPlanEdit(_Envelope):
+    type: Literal["agent.plan.edit"]
+    payload: AgentPlanEditPayload
+
+
+class AgentDiagramEdit(_Envelope):
+    type: Literal["agent.diagram.edit"]
+    payload: AgentDiagramEditPayload
+
+
 class RiskyEditReply(_Envelope):
     type: Literal["risky_edit.reply"]
     payload: RiskyEditReplyPayload
@@ -165,8 +205,11 @@ ClientMessage = Annotated[
         PlanPaste,
         PromptReply,
         DispatchReply,
+        DiagramReply,
         RiskyEditReply,
         PlanRelayout,
+        AgentPlanEdit,
+        AgentDiagramEdit,
     ],
     Field(discriminator="type"),
 ]
@@ -180,8 +223,11 @@ CLIENT_MESSAGE_TYPES: tuple[str, ...] = (
     "plan.paste",
     "prompt.reply",
     "dispatch.reply",
+    "diagram.reply",
     "risky_edit.reply",
     "plan.relayout",
+    "agent.plan.edit",
+    "agent.diagram.edit",
 )
 
 _adapter: TypeAdapter[Any] = TypeAdapter(ClientMessage)

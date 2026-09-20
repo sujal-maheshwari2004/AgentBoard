@@ -44,6 +44,9 @@ log = logging.getLogger(__name__)
 LOG_MAX_BYTES = 5 * 1024 * 1024
 LOG_BACKUPS = 3
 TAIL_POLL_S = 1.0
+#: How often the lifespan flushes agent cards dirtied by ``touch_agent``
+#: (CONTRACTS §4: heartbeats write ``card.md`` at most every 5 s per agent).
+CARD_FLUSH_POLL_S = 5.0
 MISSING_CANVAS_HTML = """<!doctype html>
 <html lang="en"><head><meta charset="utf-8"><title>Whiteboard</title>
 <style>body{font:15px/1.5 system-ui,sans-serif;max-width:40rem;margin:4rem auto;padding:0 1rem;color:#222}
@@ -205,10 +208,20 @@ def create_app(root: Path, *, mcp_factory: Callable | None = None) -> FastAPI:
             finally:
                 ctx.log.unsubscribe(q)
 
+        async def card_flush() -> None:
+            """Persist cards that ``touch_agent`` only updated in memory."""
+            while True:
+                await asyncio.sleep(CARD_FLUSH_POLL_S)
+                try:
+                    ctx.store.flush_dirty_cards()
+                except Exception:
+                    log.exception("agent card flush failed")
+
         tasks = [
             loop.create_task(debounce_worker(queue, on_change), name="wb-debounce"),
             loop.create_task(poll_tail(), name="wb-tail-poll"),
             loop.create_task(event_pump(), name="wb-event-pump"),
+            loop.create_task(card_flush(), name="wb-card-flush"),
         ]
         try:
             registry_update(str(root), {"port": ctx.port, "pid": ctx.pid, "started_at": ctx.started_at})
@@ -231,6 +244,10 @@ def create_app(root: Path, *, mcp_factory: Callable | None = None) -> FastAPI:
                 await ctx.bridge.close()
             with contextlib.suppress(Exception):
                 await ctx.hub.close_all()
+            # Last heartbeats reach disk before the watcher stops, so the
+            # writes cannot come back as external edits.
+            with contextlib.suppress(Exception):
+                ctx.store.flush_dirty_cards(force=True)
             if observer is not None:
                 with contextlib.suppress(Exception):
                     await stop_observer(observer)

@@ -22,6 +22,7 @@ from whiteboard.plan.model import Node, slugify
 from whiteboard.plan.risk import op_kind
 from whiteboard.server import protocol as P
 from whiteboard.server.bus import PendingEdit, ServerContext
+from whiteboard.server.chat import chat_backfill
 from whiteboard.server.hub import Connection, envelope
 
 __all__ = ["serve_websocket", "dispatch", "origin_allowed", "describe_ops", "ingest_paste"]
@@ -113,9 +114,35 @@ async def on_hello(ctx: ServerContext, conn: Connection, msg: P.ClientHello) -> 
         _error(ctx, conn, "protocol", f"unsupported protocol {msg.payload.protocol}; server speaks 1", msg.seq)
     snapshot = ctx.store.snapshot().model_dump(mode="json")
     _send(ctx, conn, "plan.snapshot", snapshot, reply_to=msg.seq)
+    # Chat history is replayed whatever ``lastSeq`` says (the client dedupes on
+    # ``id``), and with ``hub.send`` rather than ``bus.publish``: a publish would
+    # re-project every replayed chat event to every other client.
+    for message in chat_backfill(ctx.log):
+        _send(ctx, conn, "chat.message", message)
     for ev in ctx.log.read_since(msg.payload.lastSeq, limit=ALL_EVENTS_LIMIT):
         _send(ctx, conn, "event.append", ev.model_dump(), seq=ev.seq)
+    _send_pending_diagrams(ctx, conn)
     _send(ctx, conn, "bridge.status", ctx.bridge.status())
+
+
+def _send_pending_diagrams(ctx: ServerContext, conn: Connection) -> None:
+    """Re-send one ``diagram.request`` per unresolved proposal (A.2.5).
+
+    The diff is recomputed against the board as it is *now*, so a proposal that
+    went stale while the server was down arrives with an ``error`` instead of a
+    stale diff; approving it still fails cleanly with ``bad_diagram``.
+    """
+    for rid, pending in sorted(ctx.store.pending_diagrams.items(), key=lambda kv: kv[1].get("seq") or 0):
+        name = str(pending.get("name") or "hld")
+        mermaid = str(pending.get("mermaid") or "")
+        try:
+            diff: dict[str, Any] = ctx.store.diagram_diff(name, mermaid)
+        except ValueError as exc:
+            diff = {"nodes_added": [], "nodes_removed": [], "edges_added": [], "edges_removed": [], "error": str(exc)}
+        _send(ctx, conn, "diagram.request", {
+            "request_id": rid, "name": name, "mermaid": mermaid,
+            "rationale": pending.get("rationale") or "", **diff,
+        })
 
 
 def _commit_edit(ctx: ServerContext, conn: Connection, ops: list[dict], result, for_seq: int | None, *, source: str) -> None:
@@ -208,15 +235,18 @@ async def on_chat(ctx: ServerContext, conn: Connection, msg: P.ChatMessage) -> N
         _error(ctx, conn, "bad_payload", "chat.message: text is empty", msg.seq)
         return
     to = msg.payload.agentId or "root"
+    thread = (msg.payload.thread or "").strip() or to
     ctx.log.append(
         agent_id="user",
         node_id=msg.payload.nodeId,
         type="chat",
         note=text,
         notified=[to] if to != "root" else [],
-        data={"to": to, "nodeId": msg.payload.nodeId},
+        data={"from": "user", "to": to, "thread": thread, "reply_to": msg.payload.reply_to, "nodeId": msg.payload.nodeId},
     )
-    ctx.bus.push_root([f"chat (to: {to}): {_q(text, 400)}"])
+    # No ack: the ``chat.message`` the Bus projects out of the event is the
+    # receipt, and it reaches every client including this one.
+    ctx.bus.push_root([f"chat (to: {to}, thread {thread}): {_q(text, 400)}"])
 
 
 def ingest_paste(ctx: ServerContext, text: str) -> tuple[str, dict]:
@@ -349,6 +379,120 @@ async def on_dispatch_reply(ctx: ServerContext, conn: Connection, msg: P.Dispatc
         ctx.bus.push_root([f"dispatch rejected: {node_id} → {agent_id}" + (f" — {_q(note)}" if note else "")])
 
 
+async def on_diagram_reply(ctx: ServerContext, conn: Connection, msg: P.DiagramReply) -> None:
+    """Approve or reject a ``propose_diagram`` proposal (A.2.4).
+
+    Idempotent exactly like :func:`on_dispatch_reply`: the log is the audit
+    trail, so a re-delivered reply is refused rather than appending a second
+    decision. Approving is the only thing that writes ``plan/<name>.md`` —
+    invalid mermaid leaves the proposal pending so it can be fixed and re-sent.
+    """
+    rid = msg.payload.request_id
+    proposed = _find_event(ctx, "diagram_proposed", rid)
+    if proposed is None:
+        _error(ctx, conn, "unknown_request", f"no diagram_proposed event with request_id {rid!r}", msg.seq)
+        return
+    settled = _find_event(ctx, "diagram_approved", rid) or _find_event(ctx, "diagram_rejected", rid)
+    if settled is not None:
+        _error(ctx, conn, "already_resolved", f"diagram proposal {rid!r} was already {settled.type}", msg.seq)
+        return
+    pending = ctx.store.pending_diagrams.get(rid) or {}
+    name = str(pending.get("name") or proposed.data.get("name") or "hld")
+    proposed_mermaid = str(pending.get("mermaid") or proposed.data.get("mermaid") or "")
+    owner_mermaid = (msg.payload.mermaid or "").strip()
+    text = owner_mermaid or proposed_mermaid
+    edited = bool(owner_mermaid) and owner_mermaid != proposed_mermaid.strip()
+    note = (msg.payload.note or "").strip()
+    suffix = f" — {_q(note)}" if note else ""
+
+    if not msg.payload.approved:
+        ctx.store.pending_diagrams.pop(rid, None)
+        ctx.log.append(
+            agent_id="user", node_id=None, type="diagram_rejected", note=note,
+            data={"request_id": rid, "name": name, "note": note},
+        )
+        _ack(ctx, conn, msg.seq)
+        ctx.bus.push_root([f"diagram rejected: {name} (req {rid}){suffix}"])
+        return
+
+    before = set(ctx.store.nodes)
+    try:
+        diagram = ctx.store.write_diagram(name, text)
+    except ValueError as exc:
+        # The proposal stays pending: the owner can fix the mermaid and re-reply.
+        _error(ctx, conn, "bad_diagram", str(exc), msg.seq)
+        return
+    created = [nid for nid in ctx.store.nodes if nid not in before]
+    boxes = len(ctx.store.diagrams[name].doc.nodes) if name in ctx.store.diagrams else 0
+    ctx.bus.publish_messages(ctx.store.last_messages)
+    _ack(ctx, conn, msg.seq)
+    ctx.store.pending_diagrams.pop(rid, None)
+    ctx.log.append(
+        agent_id="user", node_id=None, type="diagram_approved", note=note,
+        data={"request_id": rid, "name": name, "note": note, "edited": edited,
+              "created": created, "edges": len(diagram.edges)},
+    )
+    made = f"; created {', '.join(created)}" if created else ""
+    ctx.bus.push_root([
+        f"diagram approved: {name} (req {rid}; {boxes} nodes, {len(diagram.edges)} edges{made}){suffix}"
+    ])
+
+
+def _log_agent_edit(ctx: ServerContext, agent_id: str, node_id: str | None, field: str, diff: str, summary: str) -> None:
+    """Log one canvas-side agent edit and push it for the root to relay."""
+    ctx.log.append(
+        agent_id="user",
+        node_id=node_id,
+        type="agent_plan_edited",
+        note=summary,
+        notified=[agent_id],
+        data={"source": "canvas", "agent_id": agent_id, "field": field, "diff": diff,
+              "ids": [agent_id], "path": f".whiteboard/agents/{agent_id}/{'plan.md' if field == 'plan_md' else 'diagrams.md'}"},
+    )
+    ctx.bus.push_root([summary])
+
+
+async def on_agent_plan_edit(ctx: ServerContext, conn: Connection, msg: P.AgentPlanEdit) -> None:
+    """The owner rewrote a (possibly running) agent's job spec on the canvas (A.6.3)."""
+    agent_id = msg.payload.agent_id
+    card = ctx.store.get_agent(agent_id)
+    if card is None:
+        _error(ctx, conn, "unknown_agent", f"unknown agent {agent_id!r}", msg.seq)
+        return
+    old = card.plan_md
+    new = msg.payload.plan_md
+    if new == old:
+        _ack(ctx, conn, msg.seq)
+        return
+    diff, first = ctx.store.agent_field_diff(agent_id, "plan_md", old, new)
+    updated = ctx.store.upsert_agent(agent_id, None, plan_md=new)
+    ctx.bus.publish_messages(ctx.store.last_messages)
+    _ack(ctx, conn, msg.seq)
+    _log_agent_edit(ctx, agent_id, updated.assigned_node, "plan_md", diff, f"agent plan edited: {agent_id} — {first}")
+
+
+async def on_agent_diagram_edit(ctx: ServerContext, conn: Connection, msg: P.AgentDiagramEdit) -> None:
+    """The owner edited an agent's own component diagram on the canvas (A.6.3)."""
+    agent_id = msg.payload.agent_id
+    card = ctx.store.get_agent(agent_id)
+    if card is None:
+        _error(ctx, conn, "unknown_agent", f"unknown agent {agent_id!r}", msg.seq)
+        return
+    old = card.diagrams_md
+    try:
+        updated = ctx.store.write_agent_diagram(agent_id, msg.payload.mermaid)
+    except ValueError as exc:
+        _reject(ctx, conn, msg.seq, str(exc), [])
+        return
+    if updated.diagrams_md == old:
+        _ack(ctx, conn, msg.seq)
+        return
+    diff, first = ctx.store.agent_field_diff(agent_id, "diagrams_md", old, updated.diagrams_md)
+    ctx.bus.publish_messages(ctx.store.last_messages)
+    _ack(ctx, conn, msg.seq)
+    _log_agent_edit(ctx, agent_id, updated.assigned_node, "diagrams_md", diff, f"agent diagram edited: {agent_id} — {first}")
+
+
 async def on_risky_reply(ctx: ServerContext, conn: Connection, msg: P.RiskyEditReply) -> None:
     rid = msg.payload.request_id
     note = (msg.payload.note or "").strip()
@@ -394,8 +538,11 @@ HANDLERS = {
     "plan.paste": on_paste,
     "prompt.reply": on_prompt_reply,
     "dispatch.reply": on_dispatch_reply,
+    "diagram.reply": on_diagram_reply,
     "risky_edit.reply": on_risky_reply,
     "plan.relayout": on_relayout,
+    "agent.plan.edit": on_agent_plan_edit,
+    "agent.diagram.edit": on_agent_diagram_edit,
 }
 
 

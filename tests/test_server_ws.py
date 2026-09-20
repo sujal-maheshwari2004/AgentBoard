@@ -180,7 +180,7 @@ def test_node_status_button(client: TestClient, project: Path) -> None:
 
 
 # ------------------------------------------------------------------- chat
-def test_chat_logs_event_and_queues_bridge_line(client: TestClient) -> None:
+def test_chat_logs_event_projects_message_and_queues_bridge_line(client: TestClient) -> None:
     with client.websocket_connect("/ws") as ws:
         hello(ws)
         ws.send_json({"type": "chat.message", "payload": {"text": "can we merge?", "agentId": "agent-parser", "nodeId": "node-a"}, "seq": 2})
@@ -188,12 +188,28 @@ def test_chat_logs_event_and_queues_bridge_line(client: TestClient) -> None:
         assert [m["type"] for m in seen] == ["event.append"]
         p = ev["payload"]
         assert p["type"] == "chat" and p["agent_id"] == "user" and p["note"] == "can we merge?"
-        assert p["data"] == {"to": "agent-parser", "nodeId": "node-a"} and p["notified"] == ["agent-parser"]
-        assert ev["seq"] == p["seq"] == 1
-        ws.send_json({"type": "chat.message", "payload": {"text": "hello root"}, "seq": 3})
+        assert p["data"] == {"from": "user", "to": "agent-parser", "thread": "agent-parser",
+                             "reply_to": None, "nodeId": "node-a"}
+        assert p["notified"] == ["agent-parser"] and ev["seq"] == p["seq"] == 1
+        # exactly one chat.message rides along with the event (the Bus projection)
+        msg, seen = recv_until(ws, "chat.message")
+        assert [m["type"] for m in seen] == ["chat.message"]
+        assert msg["payload"] == {
+            "id": "chat-1", "thread": "agent-parser", "from": "user", "to": "agent-parser",
+            "text": "can we merge?", "ts": p["ts"], "seq": 1, "reply_to": None, "node_id": "node-a",
+        }
+        # an explicit thread wins, and reply_to is carried through
+        ws.send_json({"type": "chat.message", "payload": {"text": "hello root", "thread": "agent-parser", "reply_to": "chat-1"}, "seq": 3})
         ev2, _ = recv_until(ws, "event.append")
         assert ev2["payload"]["data"]["to"] == "root" and ev2["payload"]["node_id"] is None
-    assert _bridge_lines(client) == ['chat (to: agent-parser): "can we merge?"', 'chat (to: root): "hello root"']
+        assert ev2["payload"]["data"]["thread"] == "agent-parser"
+        msg2, _ = recv_until(ws, "chat.message")
+        assert msg2["payload"]["thread"] == "agent-parser" and msg2["payload"]["reply_to"] == "chat-1"
+        assert msg2["payload"]["id"] == "chat-2"
+    assert _bridge_lines(client) == [
+        'chat (to: agent-parser, thread agent-parser): "can we merge?"',
+        'chat (to: root, thread agent-parser): "hello root"',
+    ]
     assert [e["type"] for e in _events(client)] == ["chat", "chat"]
 
 

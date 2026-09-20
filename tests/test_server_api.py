@@ -40,7 +40,8 @@ def _free_port() -> int:
 def test_health_and_registry(client: TestClient, project: Path) -> None:
     body = client.get("/api/health").json()
     assert body["project"] == str(project.resolve()) and body["pid"] == os.getpid()
-    assert body["nodes"] == 3 and body["agents"] == 0 and body["clients"] == 0 and body["latest_seq"] == 0
+    assert body["nodes"] == 3 and body["agents"] == [] and body["clients"] == 0 and body["latest_seq"] == 0
+    assert body["agent_count"] == 0 and body["pending_diagrams"] == 0
     assert isinstance(body["rev"], int) and body["uptime_s"] >= 0 and body["port"] == 0
     assert set(body["bridge"]) >= {"ok", "failures", "last_error", "last_pushed_seq", "socket"}
     reg = registry_read()

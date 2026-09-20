@@ -21,13 +21,12 @@ COLLABORATION = (REPO / "templates" / "COLLABORATION.md").read_text(encoding="ut
 
 #: Bullets whose emitter lands with the server stages (plan §A.2, §A.5, §A.6). Until those merge
 #: the registry documents them and nothing pushes them; the set must only ever shrink.
-PENDING_EMITTERS = {
-    "diagram approved: ",
-    "diagram rejected: ",
-    "agent plan edited: ",
-    "agent diagram edited: ",
-    # "acknowledged plan edit (event " — emitted by report_progress(ack_event_seq=) since A.S3.
-}
+PENDING_EMITTERS: set[str] = set()
+# Every registry prefix has an emitter since A.S4:
+#   "acknowledged plan edit (event " — report_progress(ack_event_seq=) (A.S3)
+#   "diagram approved: " / "diagram rejected: " — handlers.on_diagram_reply
+#   "agent plan edited: " / "agent diagram edited: " — handlers.on_agent_{plan,diagram}_edit
+#   (the same two lines also come from the store's external-edit summaries)
 
 #: v2 tools the root session is responsible for calling — they must be named in SKILL.md.
 ROOT_V2_TOOLS = (

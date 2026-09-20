@@ -15,6 +15,7 @@ from pydantic import BaseModel, ConfigDict
 
 from whiteboard.server import handlers
 from whiteboard.server.bus import ServerContext
+from whiteboard.server.chat import CHAT_BACKFILL_PER_THREAD, chat_message_from_event
 
 __all__ = ["router", "ctx_of"]
 
@@ -55,6 +56,45 @@ async def events(request: Request, since: int = 0, limit: int = 500) -> dict:
         "latest_seq": ctx.log.latest_seq,
         "since": int(since),
         "bridge": {"last_pushed_seq": ctx.bridge.last_pushed_seq},
+    }
+
+
+def _chat_messages(ctx: ServerContext) -> list[dict]:
+    """Every chat message in the log, oldest first (the threads endpoints)."""
+    out: list[dict] = []
+    for ev in ctx.log.read_since(0, limit=handlers.ALL_EVENTS_LIMIT):
+        message = chat_message_from_event(ev)
+        if message is not None:
+            out.append(message)
+    return out
+
+
+@router.get("/api/threads")
+async def threads(request: Request) -> dict:
+    """One row per chat thread: how many messages it has and where it ends."""
+    ctx = ctx_of(request)
+    rows: dict[str, dict] = {}
+    for message in _chat_messages(ctx):
+        row = rows.setdefault(message["thread"], {"count": 0, "last_seq": 0, "last_ts": None})
+        row["count"] += 1
+        row["last_seq"] = message["seq"]
+        row["last_ts"] = message["ts"]
+    return {"threads": rows}
+
+
+@router.get("/api/threads/{thread}")
+async def thread(request: Request, thread: str, since: int = 0, limit: int = CHAT_BACKFILL_PER_THREAD) -> dict:
+    """One thread's messages after ``since``, oldest first. ``latest_seq`` is the
+    cursor to pass as the next ``since`` (the last message returned, or ``since``
+    when there was none)."""
+    ctx = ctx_of(request)
+    limit = max(0, min(int(limit), 1000))
+    matching = [m for m in _chat_messages(ctx) if m["thread"] == thread and m["seq"] > int(since)]
+    messages = matching[:limit]
+    return {
+        "thread": thread,
+        "messages": messages,
+        "latest_seq": messages[-1]["seq"] if messages else int(since),
     }
 
 
@@ -101,6 +141,7 @@ async def debug_state(request: Request) -> dict:
         "last_good": ctx.store.last_good,
         "invalid": dict(ctx.store.invalid),
         "pending_edits": {rid: _jsonable(p) for rid, p in ctx.store.pending_edits.items()},
+        "pending_diagrams": {rid: _jsonable(d) for rid, d in ctx.store.pending_diagrams.items()},
         "pending_prompts": {pid: dict(p) for pid, p in ctx.log.pending_prompts.items()},
         "bridge": ctx.bridge.status(),
         "clients": ctx.hub.clients,

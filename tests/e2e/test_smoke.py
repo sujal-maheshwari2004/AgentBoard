@@ -361,7 +361,7 @@ def test_full_loop_against_real_daemon() -> None:
         def chat_pushed() -> dict | None:
             for lines in list(inbox.connections):
                 for line in lines:
-                    if line.get("type") == "user" and "chat (to: agent-a)" in line.get("text", ""):
+                    if line.get("type") == "user" and "chat (to: agent-a, thread agent-a)" in line.get("text", ""):
                         return line
             return None
 
