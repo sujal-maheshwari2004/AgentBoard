@@ -191,6 +191,10 @@ class PlanStore:
         self.layouts: dict[str, dict] = {}
         self.invalid: dict[str, str] = {}
         self.pending_edits: dict[str, dict] = {}
+        #: Diagram proposals awaiting the owner's decision, keyed by request id
+        #: (``{name, mermaid, rationale, agent_id, created_at, seq}``). Rebuilt
+        #: from unresolved ``diagram_proposed`` events at load (CONTRACTS §4).
+        self.pending_diagrams: dict[str, dict] = {}
         self.last_good: dict = {}
         self.last_messages: list[ServerMessage] = []
         self.writes = 0
@@ -1149,9 +1153,11 @@ class PlanStore:
         return self._transition(new_nodes)
 
     # -------------------------------------------------------- diagram API
-    def write_diagram(self, name: str, mermaid: str) -> Diagram:
-        """Validate ``mermaid``, write ``plan/<name>.md`` with the block replaced
-        and sync depends_on from its edges (creating missing nodes)."""
+    def validate_diagram(self, name: str, mermaid: str) -> MermaidDoc:
+        """Parse and check ``mermaid`` as board ``name`` **writing nothing**:
+        the diagram name, the mermaid itself, every box id and the cycle-freeness
+        of the depends_on graph it implies. Raises ``ValueError`` with a message
+        meant for the caller; returns the parsed document."""
         if not DIAGRAM_NAME_RE.match(name or ""):
             raise ValueError(f"invalid diagram name {name!r}")
         try:
@@ -1165,6 +1171,42 @@ class PlanStore:
                 raise ValueError(f"diagram box {bid!r} is not a valid node id: {exc}") from exc
         new_nodes, _created = self._reconcile_diagram(name, doc, self.nodes, mode="set")
         self._check_cycles(new_nodes)
+        return doc
+
+    def diagram_diff(self, name: str, mermaid: str) -> dict:
+        """What writing ``mermaid`` to board ``name`` would change, as
+        ``{nodes_added, nodes_removed, edges_added, edges_removed}``. Validates
+        first (so an invalid proposal raises here) and writes nothing."""
+        doc = self.validate_diagram(name, mermaid)
+        state = self.diagrams.get(name)
+        current = state.doc if state is not None else None
+        cur_boxes = dict(current.nodes) if current is not None else {}
+        cur_edges = {(e.src, e.dst): e.label for e in (current.edges if current is not None else [])}
+        new_edges = {(e.src, e.dst): e.label for e in doc.edges}
+        return {
+            "nodes_added": [
+                {"id": bid, "label": box.label or bid}
+                for bid, box in doc.nodes.items()
+                if bid not in cur_boxes
+            ],
+            "nodes_removed": [bid for bid in cur_boxes if bid not in doc.nodes],
+            "edges_added": [
+                {"src": src, "dst": dst, "label": label}
+                for (src, dst), label in new_edges.items()
+                if (src, dst) not in cur_edges
+            ],
+            "edges_removed": [
+                {"src": src, "dst": dst, "label": label}
+                for (src, dst), label in cur_edges.items()
+                if (src, dst) not in new_edges
+            ],
+        }
+
+    def write_diagram(self, name: str, mermaid: str) -> Diagram:
+        """Validate ``mermaid``, write ``plan/<name>.md`` with the block replaced
+        and sync depends_on from its edges (creating missing nodes)."""
+        doc = self.validate_diagram(name, mermaid)
+        new_nodes, _created = self._reconcile_diagram(name, doc, self.nodes, mode="set")
         state = self.diagrams.get(name)
         if state is None:
             state = self._new_diagram_state(name)

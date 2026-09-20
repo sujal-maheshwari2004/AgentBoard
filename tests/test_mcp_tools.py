@@ -19,8 +19,10 @@ from whiteboard.mcp_server import (
     guard_result,
     read_only_skeleton,
 )
+from whiteboard.plan.model import Event
 from whiteboard.plan.store import PlanStore
 from whiteboard.scaffold import scaffold
+from whiteboard.server.chat import chat_message_from_event
 
 CONTRACT_TOOLS = {
     "status", "read_plan", "read_node", "read_collaboration", "read_plan_md",
@@ -28,6 +30,8 @@ CONTRACT_TOOLS = {
     "upsert_agent", "set_agent_status", "append_event", "ask_user", "get_reply",
     "get_dispatchable", "propose_dispatch", "get_events", "wait_for_events",
     "get_skeleton", "read_peer_node", "save_layout",
+    "propose_diagram", "set_agent_ref", "write_agent_plan", "write_agent_diagram",
+    "report_progress", "finalize_agent", "chat_reply",
 }
 
 
@@ -38,6 +42,9 @@ class FakeBus:
 
     def publish(self, type: str, payload: dict, *, seq: int | None = None) -> None:
         self.published.append((type, payload, seq))
+        # the real Bus projects every chat event into a chat.message broadcast
+        if type == "event.append" and payload.get("type") == "chat":
+            self.published.append(("chat.message", chat_message_from_event(Event(**payload)), None))
 
     def push_root(self, lines: list[str]) -> None:
         self.pushed.extend(lines)
@@ -122,7 +129,12 @@ async def test_tool_names_match_contract(h: Harness) -> None:
     tools = await h.list_tools()
     assert {t.name for t in tools} == CONTRACT_TOOLS
     assert h.server.name == "whiteboard"
-    assert "append_event" in (h.server.instructions or "") and "ask_user" in h.server.instructions
+    text = h.server.instructions or ""
+    assert "append_event" in text and "ask_user" in text
+    for mentioned in ("propose_diagram", "chat_reply", "report_progress", "finalize_agent",
+                      "write_agent_plan", "write_agent_diagram", "set_agent_ref"):
+        assert mentioned in text, mentioned
+    assert "upsert_agent(claude_agent_ref=" not in text  # replaced by set_agent_ref
 
 
 async def test_tool_params_match_contract(h: Harness) -> None:
@@ -136,6 +148,19 @@ async def test_tool_params_match_contract(h: Harness) -> None:
     assert props("append_event") == {"agent_id", "node_id", "type", "note", "data"}
     assert props("ask_user") == {"agent_id", "question", "choices", "node_id", "kind"}
     assert props("propose_dispatch") == {"node_id", "agent_id", "job_spec_md"}
+    assert props("propose_diagram") == {"name", "mermaid", "rationale"}
+    assert set(tools["propose_diagram"].input_schema["required"]) == {"name", "mermaid"}
+    assert props("set_agent_ref") == {"agent_id", "claude_agent_ref", "spawned_at"}
+    assert props("write_agent_plan") == {"agent_id", "plan_md"}
+    assert props("write_agent_diagram") == {"agent_id", "mermaid"}
+    assert props("report_progress") == {
+        "agent_id", "activity", "progress", "metrics", "files_touched", "final", "ack_event_seq"
+    }
+    assert set(tools["report_progress"].input_schema["required"]) == {"agent_id"}
+    assert props("finalize_agent") == {
+        "agent_id", "tokens_in", "tokens_out", "cost_usd", "duration_s", "note"
+    }
+    assert props("chat_reply") == {"from_id", "text", "thread", "reply_to"}
     assert props("wait_for_events") == {"since_seq", "timeout_s"}
     assert props("get_events") == {"since_seq", "limit"}
     assert props("status") == set()
@@ -227,6 +252,68 @@ async def test_write_diagram_creates_nodes(h: Harness, root: Path) -> None:
         await h.call("write_diagram", name="hld", mermaid="flowchart TD\n    node-a --> \n")
 
 
+async def test_propose_diagram_validates_and_publishes(h: Harness, root: Path) -> None:
+    await h.chain()  # node-c is the only box on the lld board
+    before = (_wb(root) / "plan" / "lld.md").read_bytes()
+    rev = h.store.rev
+    h.bus.published.clear()
+    mermaid = "flowchart TD\n    node-c[C thing]\n    node-parser[Mermaid parser]\n    node-c --> node-parser\n"
+    out = await h.call("propose_diagram", name="lld", mermaid=mermaid, rationale="split the parser out")
+
+    assert len(out["request_id"]) == 8
+    assert out["nodes_added"] == [{"id": "node-parser", "label": "Mermaid parser"}]
+    assert out["nodes_removed"] == [] and out["edges_removed"] == []
+    assert out["edges_added"] == [{"src": "node-c", "dst": "node-parser", "label": None}]
+
+    # a proposal writes nothing at all
+    assert (_wb(root) / "plan" / "lld.md").read_bytes() == before
+    assert "node-parser" not in h.store.nodes and h.store.rev == rev
+    assert not (_wb(root) / "plan" / "nodes" / "node-parser.md").exists()
+
+    pending = h.store.pending_diagrams[out["request_id"]]
+    assert pending["name"] == "lld" and pending["mermaid"] == mermaid
+    assert pending["rationale"] == "split the parser out" and pending["agent_id"] == "root"
+
+    ev = (await h.call("get_events"))["events"][-1]
+    assert ev["type"] == "diagram_proposed" and ev["seq"] == pending["seq"] and ev["ts"] == pending["created_at"]
+    assert ev["data"]["request_id"] == out["request_id"] and ev["data"]["mermaid"] == mermaid
+    assert ev["data"]["rationale"] == "split the parser out"
+    assert ev["data"]["diff"]["nodes_added"] == out["nodes_added"]
+    assert h.bus.payloads("diagram.request") == [{
+        "request_id": out["request_id"], "name": "lld", "mermaid": mermaid,
+        "rationale": "split the parser out",
+        "nodes_added": out["nodes_added"], "nodes_removed": [],
+        "edges_added": out["edges_added"], "edges_removed": [],
+    }]
+    assert h.bus.published[-2][0] == "event.append"  # the event was broadcast first
+    assert h.bus.pushed == []  # the owner approves on the canvas; root is not pushed
+
+    with pytest.raises(ToolFailure, match="invalid mermaid"):
+        await h.call("propose_diagram", name="hld", mermaid="flowchart TD\n    node-a --> \n")
+    with pytest.raises(ToolFailure, match="dependency cycle"):
+        await h.call(
+            "propose_diagram", name="hld",
+            mermaid="flowchart TD\n    node-a --> node-b\n    node-b --> node-a\n",
+        )
+    with pytest.raises(ToolFailure, match="invalid diagram name"):
+        await h.call("propose_diagram", name="Bad Name", mermaid="flowchart TD\n    node-a\n")
+    assert list(h.store.pending_diagrams) == [out["request_id"]]  # no failed proposal stuck
+
+
+async def test_propose_diagram_diffs_removals(h: Harness) -> None:
+    await h.chain()
+    out = await h.call("propose_diagram", name="hld", mermaid="flowchart TD\n    node-a[A thing]\n")
+    assert out["nodes_added"] == [] and out["nodes_removed"] == ["node-b"]
+    assert out["edges_removed"] == [{"src": "node-a", "dst": "node-b", "label": None}]
+    assert out["edges_added"] == []
+    # a board that does not exist yet is all additions
+    out = await h.call("propose_diagram", name="api", mermaid="flowchart TD\n    node-a --> node-d\n")
+    assert [n["id"] for n in out["nodes_added"]] == ["node-a", "node-d"]
+    assert out["nodes_removed"] == [] and out["edges_removed"] == []
+    assert "node-d" not in h.store.nodes  # still nothing written
+    assert len(h.store.pending_diagrams) == 2
+
+
 # ----------------------------------------------------------------- agents
 
 
@@ -257,6 +344,138 @@ async def test_upsert_agent_requires_existing_node(h: Harness) -> None:
         await h.call("upsert_agent", agent_id="agent-x", assigned_node="node-nope")
     with pytest.raises(ToolFailure, match="unknown agent"):
         await h.call("set_agent_status", agent_id="agent-x", status="working")
+
+
+async def test_set_agent_ref_records_spawned(h: Harness) -> None:
+    await h.chain()
+    await h.call("upsert_agent", agent_id="agent-a", assigned_node="node-a")
+    h.bus.published.clear()
+    card = await h.call(
+        "set_agent_ref", agent_id="agent-a", claude_agent_ref="agent_01xyz",
+        spawned_at="2026-09-20T10:00:00.000Z",
+    )
+    assert card["claude_agent_ref"] == "agent_01xyz" and card["spawned_at"] == "2026-09-20T10:00:00.000Z"
+    assert h.store.get_agent("agent-a").claude_agent_ref == "agent_01xyz"
+    assert "agent.card.upsert" in h.bus.types()
+    ev = (await h.call("get_events"))["events"][-1]
+    assert ev["type"] == "spawned" and ev["agent_id"] == "root" and ev["node_id"] == "node-a"
+    assert ev["data"] == {
+        "agent_id": "agent-a", "claude_agent_ref": "agent_01xyz",
+        "spawned_at": "2026-09-20T10:00:00.000Z",
+    }
+    with pytest.raises(ToolFailure, match="unknown agent"):
+        await h.call("set_agent_ref", agent_id="agent-zz", claude_agent_ref="x")
+
+
+async def test_write_agent_plan_and_diagram(h: Harness, root: Path) -> None:
+    await h.chain()
+    await h.call("upsert_agent", agent_id="agent-a", assigned_node="node-a")
+    h.bus.published.clear()
+
+    card = await h.call("write_agent_plan", agent_id="agent-a", plan_md="# Job spec: revised\n")
+    assert card["plan_md"] == "# Job spec: revised\n" and card["assigned_node"] == "node-a"
+    assert (_wb(root) / "agents" / "agent-a" / "plan.md").read_text() == "# Job spec: revised\n"
+    assert "agent.card.upsert" in h.bus.types()
+    ev = (await h.call("get_events"))["events"][-1]
+    assert ev["type"] == "agent_changed" and ev["agent_id"] == "agent-a" and ev["node_id"] == "node-a"
+    assert ev["data"] == {"file": ".whiteboard/agents/agent-a/plan.md"}
+
+    mermaid = "flowchart TD\n    parser[Parser]\n    store[(Store)]\n    parser --> store\n"
+    card = await h.call("write_agent_diagram", agent_id="agent-a", mermaid=mermaid)
+    assert mermaid in card["diagrams_md"]  # the raw text goes into fence 0
+    assert mermaid in (_wb(root) / "agents" / "agent-a" / "diagrams.md").read_text()
+    assert card["diagram"]["direction"] == "TD"
+    assert card["diagram"]["nodes"] == [{"id": "parser", "label": "Parser"}, {"id": "store", "label": "Store"}]
+    assert card["diagram"]["edges"] == [{"src": "parser", "dst": "store", "label": None}]
+    assert card["plan_md"] == "# Job spec: revised\n"  # the plan is untouched
+    assert set(h.store.nodes) == {"node-a", "node-b", "node-c"}  # free-form boxes are not plan nodes
+    ev = (await h.call("get_events"))["events"][-1]
+    assert ev["type"] == "agent_changed" and ev["data"] == {"file": ".whiteboard/agents/agent-a/diagrams.md"}
+
+    with pytest.raises(ToolFailure, match="invalid mermaid"):
+        await h.call("write_agent_diagram", agent_id="agent-a", mermaid="flowchart TD\n    a --> \n")
+    with pytest.raises(ToolFailure, match="unknown agent"):
+        await h.call("write_agent_plan", agent_id="agent-zz", plan_md="x")
+    with pytest.raises(ToolFailure, match="unknown agent"):
+        await h.call("write_agent_diagram", agent_id="agent-zz", mermaid="flowchart TD\n    a\n")
+
+
+async def test_report_progress_throttles_heartbeat_events(h: Harness, root: Path, monkeypatch) -> None:
+    await h.chain()
+    await h.call("upsert_agent", agent_id="agent-a", assigned_node="node-a", status="working")
+    rev = h.store.rev
+    plan_md = (_wb(root) / "PLAN.md").read_bytes()
+    h.bus.published.clear()
+    h.bus.pushed.clear()
+
+    seqs = []
+    for activity in ("reading the store", "writing tests", "running pytest"):
+        out = await h.call("report_progress", agent_id="agent-a", activity=activity, progress=0.5)
+        seqs.append(out["heartbeat_seq"])
+    # the activity changed each time, but the calls are <2 s apart: only the first is logged
+    assert seqs[0] is not None and seqs[1:] == [None, None]
+    card = h.store.get_agent("agent-a")
+    assert card.activity == "running pytest" and card.progress == 0.5 and card.heartbeat_at
+    assert h.bus.types().count("agent.card.upsert") == 3  # the card stays live on every call
+    assert h.store.rev == rev and (_wb(root) / "PLAN.md").read_bytes() == plan_md
+
+    monkeypatch.setattr("whiteboard.mcp_server.HEARTBEAT_EVENT_MIN_GAP_S", 0.0)
+    same = await h.call("report_progress", agent_id="agent-a", activity="reading the store")
+    assert same["heartbeat_seq"] is None  # unchanged since the last logged heartbeat
+    out = await h.call(
+        "report_progress", agent_id="agent-a", activity="fixing a bug",
+        metrics={"tool_calls": 12}, files_touched=["a.py", "a.py", "b.py"],
+    )
+    assert out["heartbeat_seq"] is not None
+    assert out["agent"]["metrics"] == {"tool_calls": 12, "files_touched": ["a.py", "b.py"]}
+
+    h.bus.pushed.clear()
+    out = await h.call("report_progress", agent_id="agent-a", activity="re-read the plan", ack_event_seq=7)
+    assert out["heartbeat_seq"] is not None
+    assert h.bus.pushed == ['agent-a acknowledged plan edit (event 7): "re-read the plan"']
+    ev = (await h.call("get_events"))["events"][-1]
+    assert ev["type"] == "heartbeat" and ev["agent_id"] == "agent-a" and ev["node_id"] == "node-a"
+    assert ev["note"] == "re-read the plan"
+    assert ev["data"] == {
+        "activity": "re-read the plan", "progress": 0.5,
+        "metrics": {"tool_calls": 12, "files_touched": ["a.py", "b.py"]},
+        "final": False, "ack": 7,
+    }
+
+    monkeypatch.setattr("whiteboard.mcp_server.HEARTBEAT_EVENT_MIN_GAP_S", 60.0)
+    out = await h.call("report_progress", agent_id="agent-a", progress=1.0, final=True)
+    assert out["heartbeat_seq"] is not None  # a final report is never throttled
+    assert h.store.get_agent("agent-a").finished_at
+    assert (await h.call("get_events"))["events"][-1]["data"]["final"] is True
+    assert h.store.rev == rev  # still no full commit
+    with pytest.raises(ToolFailure, match="unknown agent"):
+        await h.call("report_progress", agent_id="agent-zz", activity="x")
+
+
+async def test_finalize_agent(h: Harness, root: Path) -> None:
+    await h.chain()
+    await h.call("upsert_agent", agent_id="agent-a", assigned_node="node-a", status="working")
+    await h.call("report_progress", agent_id="agent-a", activity="wiring it up", metrics={"tool_calls": 3})
+    rev = h.store.rev
+    h.bus.published.clear()
+
+    card = await h.call(
+        "finalize_agent", agent_id="agent-a", tokens_in=1000, tokens_out=250,
+        cost_usd=0.38, duration_s=83.5, note="all green",
+    )
+    assert card["metrics"] == {
+        "tool_calls": 3, "tokens_in": 1000, "tokens_out": 250, "cost_usd": 0.38, "elapsed_s": 83.5,
+    }
+    assert card["finished_at"] and card["heartbeat_at"] == card["finished_at"]
+    assert h.store.rev == rev + 1  # exactly one full commit
+    text = (_wb(root) / "agents" / "agent-a" / "card.md").read_text()
+    assert "finished_at:" in text and "tokens_in: 1000" in text
+    assert "agent.card.upsert" in h.bus.types()
+    ev = (await h.call("get_events"))["events"][-1]
+    assert ev["type"] == "heartbeat" and ev["note"] == "all green" and ev["data"]["final"] is True
+    assert ev["data"]["metrics"]["cost_usd"] == 0.38
+    with pytest.raises(ToolFailure, match="unknown agent"):
+        await h.call("finalize_agent", agent_id="agent-zz")
 
 
 # ----------------------------------------------------------------- events
@@ -374,6 +593,39 @@ async def test_ask_user_get_reply_round_trip(h: Harness) -> None:
         await h.call("ask_user", agent_id="agent-a", question="?", kind="essay")
     with pytest.raises(ToolFailure, match="must not be empty"):
         await h.call("ask_user", agent_id="agent-a", question="  ")
+
+
+async def test_chat_reply_projects_chat_message(h: Harness) -> None:
+    await h.chain()
+    h.bus.published.clear()
+    h.bus.pushed.clear()
+    out = await h.call("chat_reply", from_id="root", text="on it; the store first")
+    ev = (await h.call("get_events"))["events"][-1]
+    assert ev["type"] == "chat" and ev["agent_id"] == "root" and ev["note"] == "on it; the store first"
+    assert ev["data"] == {"from": "root", "to": "user", "thread": "root", "reply_to": None}
+    assert out["seq"] == ev["seq"]
+    assert out["message"] == {
+        "id": f"chat-{ev['seq']}", "thread": "root", "from": "root", "to": "user",
+        "text": "on it; the store first", "ts": ev["ts"], "seq": ev["seq"],
+        "reply_to": None, "node_id": None,
+    }
+    assert h.bus.payloads("chat.message") == [out["message"]]  # exactly one projection
+    assert h.bus.pushed == []  # root is the one talking; nothing to push back to it
+
+    reply_to = f"chat-{ev['seq']}"
+    out2 = await h.call("chat_reply", from_id="agent-a", text="need the schema", reply_to=reply_to)
+    assert out2["message"]["thread"] == "agent-a" and out2["message"]["reply_to"] == reply_to
+    assert out2["message"]["from"] == "agent-a" and out2["message"]["to"] == "user"
+    out3 = await h.call("chat_reply", from_id="agent-a", text="also on the root thread", thread="root")
+    assert out3["message"]["thread"] == "root"  # an explicit thread wins
+    assert [m["id"] for m in h.bus.payloads("chat.message")] == [
+        out["message"]["id"], out2["message"]["id"], out3["message"]["id"]
+    ]
+
+    with pytest.raises(ToolFailure, match="must not be empty"):
+        await h.call("chat_reply", from_id="root", text="   ")
+    with pytest.raises(ToolFailure, match="invalid agent id"):
+        await h.call("chat_reply", from_id="Bob", text="hi")
 
 
 # ----------------------------------------------------------------- dispatch
@@ -571,6 +823,11 @@ async def test_invalid_ids_raise_with_message(h: Harness) -> None:
 def test_error_class_is_valueerror() -> None:
     assert issubclass(WhiteboardToolError, ValueError)
     assert set(EVENT_TYPES) >= {"done", "blocked", "needs_input", "reply", "chat", "info"}
+    assert len(EVENT_TYPES) == len(set(EVENT_TYPES)) == 21
+    assert set(EVENT_TYPES) >= {
+        "diagram_proposed", "diagram_approved", "diagram_rejected",
+        "spawned", "agent_plan_edited", "heartbeat",
+    }
 
 
 async def test_size_guard_truncates_large_bodies(h: Harness) -> None:

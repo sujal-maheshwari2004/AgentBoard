@@ -18,6 +18,7 @@ import asyncio
 import functools
 import json
 import logging
+import time
 import uuid
 from collections.abc import Awaitable, Callable
 from pathlib import Path
@@ -39,9 +40,11 @@ from whiteboard.plan.model import (
     validate_node_id,
 )
 from whiteboard.plan.store import PlanStore
+from whiteboard.server.chat import chat_message_from_event
 
 __all__ = [
     "EVENT_TYPES",
+    "HEARTBEAT_EVENT_MIN_GAP_S",
     "MAX_RESULT_CHARS",
     "WAIT_CAP_S",
     "Bus",
@@ -55,10 +58,18 @@ _logger = logging.getLogger(__name__)
 EVENT_TYPES: tuple[str, ...] = (
     "done", "blocked", "needs_input", "reply", "chat",
     "dispatch_proposed", "dispatch_approved", "dispatch_rejected", "spawned",
+    "diagram_proposed", "diagram_approved", "diagram_rejected",
     "risky_edit", "risky_edit_accepted", "risky_edit_rejected",
-    "plan_pasted", "node_changed", "agent_changed", "info",
+    "plan_pasted", "node_changed", "agent_changed", "agent_plan_edited",
+    "heartbeat", "info",
 )
 ROOT_IDS: tuple[str, ...] = ("root", "user", "server")
+
+#: ``report_progress`` appends a ``heartbeat`` event only when the activity
+#: changed and at least this long after the last one it logged (a final report
+#: or an acknowledgement is always logged). The card itself is updated and
+#: broadcast on every call: this throttles the *audit trail*, not the canvas.
+HEARTBEAT_EVENT_MIN_GAP_S = 2.0
 
 MAX_RESULT_CHARS = 400_000
 TRUNCATED_FIELD_CHARS = 2_000
@@ -85,12 +96,30 @@ ask_user is non-blocking: it returns a prompt_id immediately; the human answers 
 the reply is appended as a `reply` event, relayed to the root session, and readable with
 get_reply(prompt_id). Poll get_reply or wait_for_events instead of blocking.
 
+Boards: plan/hld.md, plan/lld.md and plan/er.md are the three canvas boards; a node lives on
+the board named by its type. Diagrams are proposed, not written: propose_diagram(name, mermaid,
+rationale) validates and diffs the mermaid, shows it on the canvas and writes nothing; the
+owner's approval is what calls write_diagram. Draft hld, lld (and er when the plan has data)
+after intake. An agent's own component diagram is not a board: write_agent_diagram(agent_id,
+mermaid) replaces the fence in .whiteboard/agents/<agent-id>/diagrams.md with free-form box ids,
+and write_agent_plan(agent_id, plan_md) rewrites that agent's job spec.
+
 Dispatch flow (root session): read_plan / get_dispatchable -> propose_dispatch(node_id,
 agent_id, job_spec_md) writes .whiteboard/agents/<agent-id>/plan.md and asks the human on the
 canvas -> the approval arrives in the root session as a push line and a `dispatch_approved`
 event -> the root spawns the subagent with that job spec and records the handle with
-upsert_agent(claude_agent_ref=...). Subagents call set_agent_status("working") first and
-append_event(type="done"|"blocked"|"needs_input") last.
+set_agent_ref(agent_id, claude_agent_ref) (which appends the `spawned` event). Subagents call
+set_agent_status("working") first and append_event(type="done"|"blocked"|"needs_input") last.
+
+Monitoring: report_progress(agent_id, activity=..., progress=..., metrics=..., files_touched=...)
+is the cheap heartbeat - call it at every milestone; it updates the agent card live on the canvas
+(it does not rewrite the plan). Answer a plan edit announced as "event N" by re-reading your
+plan.md and calling report_progress(..., ack_event_seq=N). When a run ends the root calls
+finalize_agent(agent_id, tokens_in=..., tokens_out=..., cost_usd=..., duration_s=...).
+
+Chat is two-way: a message from the human arrives as a push line `chat (to: X, thread T)`.
+Answer it with chat_reply(from_id, text, thread=None, reply_to=None) - from_id is "root" for the
+root session or the agent's own id; never answer chat by writing files.
 """
 
 
@@ -275,6 +304,21 @@ def build_mcp_server(store: PlanStore, log: EventLog, bus: Bus, root: Path) -> M
         bus.push_root([prompt_line(prompt_id, agent_id, node_id, question)])
         return ev
 
+    #: agent id -> (monotonic time, activity) of the last logged heartbeat.
+    _heartbeats: dict[str, tuple[float, str | None]] = {}
+
+    def _heartbeat_due(agent_id: str, activity: str | None, final: bool, ack: int | None) -> bool:
+        """Whether this report_progress call also appends a ``heartbeat`` event."""
+        if final or ack is not None:
+            return True
+        if activity is None:
+            return False
+        last = _heartbeats.get(agent_id)
+        if last is None:
+            return True
+        at, last_activity = last
+        return activity != last_activity and (time.monotonic() - at) >= HEARTBEAT_EVENT_MIN_GAP_S
+
     def tool(fn: Callable[..., Awaitable[dict]]) -> Callable[..., Awaitable[dict]]:
         wrapped = _wrap_errors(fn)
         server.tool(name=fn.__name__)(wrapped)
@@ -375,6 +419,34 @@ def build_mcp_server(store: PlanStore, log: EventLog, bus: Bus, root: Path) -> M
         record("root", None, "node_changed", note, data={"diagram": name, "created": created})
         return _json(diagram)
 
+    @tool
+    async def propose_diagram(name: str, mermaid: str, rationale: str = "") -> dict:
+        """Ask the owner to approve a board diagram (hld | lld | er). Writes nothing:
+        the proposal is validated, diffed against the current board and shown on the
+        canvas; approval is what writes plan/<name>.md."""
+        diff = store.diagram_diff(name, mermaid)
+        request_id = uuid.uuid4().hex[:8]
+        note = (
+            f"propose diagram {name} (+{len(diff['nodes_added'])} nodes, "
+            f"-{len(diff['nodes_removed'])}; +{len(diff['edges_added'])} edges, "
+            f"-{len(diff['edges_removed'])})"
+        )
+        ev = record(
+            "root", None, "diagram_proposed", note,
+            data={"request_id": request_id, "name": name, "mermaid": mermaid,
+                  "rationale": rationale, "diff": diff},
+        )
+        store.pending_diagrams[request_id] = {
+            "name": name, "mermaid": mermaid, "rationale": rationale,
+            "agent_id": "root", "created_at": ev.ts, "seq": ev.seq,
+        }
+        bus.publish(
+            "diagram.request",
+            {"request_id": request_id, "name": name, "mermaid": mermaid,
+             "rationale": rationale, **diff},
+        )
+        return {"request_id": request_id, **diff}
+
     # -- agents ---------------------------------------------------------------
     @tool
     async def upsert_agent(
@@ -408,6 +480,108 @@ def build_mcp_server(store: PlanStore, log: EventLog, bus: Bus, root: Path) -> M
         publish_store()
         text = f"{agent_id} status -> {status}" + (f": {note}" if note else "")
         record(agent_id, card.assigned_node, "agent_changed", text)
+        return _json(card)
+
+    @tool
+    async def set_agent_ref(agent_id: str, claude_agent_ref: str, spawned_at: str | None = None) -> dict:
+        """Record the handle (SendMessage target) of the subagent just spawned for
+        agent_id; appends the `spawned` event. Call it right after the Agent tool returns."""
+        need_agent(agent_id)
+        card = store.set_agent_ref(agent_id, claude_agent_ref, spawned_at)
+        publish_store()
+        where = f" on {card.assigned_node}" if card.assigned_node else ""
+        record(
+            "root", card.assigned_node, "spawned", f"spawned {agent_id}{where} (ref {claude_agent_ref})",
+            data={"agent_id": agent_id, "claude_agent_ref": claude_agent_ref,
+                  "spawned_at": card.spawned_at},
+        )
+        return _json(card)
+
+    @tool
+    async def write_agent_plan(agent_id: str, plan_md: str) -> dict:
+        """Rewrite .whiteboard/agents/<agent_id>/plan.md (the agent's own job spec /
+        working notes). Call it when your plan deviates from the spec you were given."""
+        need_agent(agent_id)
+        card = store.upsert_agent(agent_id, None, plan_md=plan_md)
+        publish_store()
+        record(
+            agent_id, card.assigned_node, "agent_changed", f"{agent_id} rewrote plan.md",
+            data={"file": f".whiteboard/agents/{agent_id}/plan.md"},
+        )
+        return _json(card)
+
+    @tool
+    async def write_agent_diagram(agent_id: str, mermaid: str) -> dict:
+        """Replace the mermaid flowchart of .whiteboard/agents/<agent_id>/diagrams.md:
+        your node's LLD, one box per module, class or table. Box ids are free-form here
+        (they are not plan node ids). Refresh it before you report done."""
+        need_agent(agent_id)
+        card = store.write_agent_diagram(agent_id, mermaid)
+        publish_store()
+        record(
+            agent_id, card.assigned_node, "agent_changed", f"{agent_id} refreshed diagrams.md",
+            data={"file": f".whiteboard/agents/{agent_id}/diagrams.md"},
+        )
+        return _json(card)
+
+    @tool
+    async def report_progress(
+        agent_id: str,
+        activity: str | None = None,
+        progress: float | None = None,
+        metrics: dict | None = None,
+        files_touched: list[str] | None = None,
+        final: bool = False,
+        ack_event_seq: int | None = None,
+    ) -> dict:
+        """Heartbeat: what you are doing now (activity), how far along (progress 0..1),
+        cumulative metrics (elapsed_s, tool_calls, tokens_in, tokens_out, cost_usd) and the
+        files you touched. Cheap - call it at every milestone. Pass ack_event_seq=N to
+        acknowledge the plan edit announced in event N."""
+        need_agent(agent_id)
+        card = store.touch_agent(
+            agent_id, activity=activity, progress=progress, metrics=metrics,
+            files_touched=files_touched, finished=bool(final),
+        )
+        publish_store()
+        heartbeat_seq: int | None = None
+        if _heartbeat_due(agent_id, activity, bool(final), ack_event_seq):
+            ev = record(
+                agent_id, card.assigned_node, "heartbeat", activity or card.activity or "",
+                data={"activity": card.activity, "progress": card.progress,
+                      "metrics": card.metrics, "final": bool(final), "ack": ack_event_seq},
+            )
+            heartbeat_seq = ev.seq
+            _heartbeats[agent_id] = (time.monotonic(), card.activity)
+        if ack_event_seq is not None:
+            said = json.dumps(activity or card.activity or "")
+            bus.push_root([f"{agent_id} acknowledged plan edit (event {ack_event_seq}): {said}"])
+        return {"agent": _json(card), "heartbeat_seq": heartbeat_seq}
+
+    @tool
+    async def finalize_agent(
+        agent_id: str,
+        tokens_in: int | None = None,
+        tokens_out: int | None = None,
+        cost_usd: float | None = None,
+        duration_s: float | None = None,
+        note: str = "",
+    ) -> dict:
+        """Close out a run: merge the final token/cost/duration metrics into the card,
+        stamp finished_at and commit it in full. The root session calls this from the
+        Agent tool's completion notification."""
+        need_agent(agent_id)
+        card = store.finalize_agent(
+            agent_id, tokens_in=tokens_in, tokens_out=tokens_out,
+            cost_usd=cost_usd, duration_s=duration_s,
+        )
+        publish_store()
+        record(
+            agent_id, card.assigned_node, "heartbeat", note or f"{agent_id} finished",
+            data={"activity": card.activity, "progress": card.progress,
+                  "metrics": card.metrics, "final": True, "ack": None},
+        )
+        _heartbeats[agent_id] = (time.monotonic(), card.activity)
         return _json(card)
 
     # -- events ---------------------------------------------------------------
@@ -502,6 +676,20 @@ def build_mcp_server(store: PlanStore, log: EventLog, bus: Bus, root: Path) -> M
         if out["answered"]:
             out["value"] = prompt.get("value")
         return out
+
+    @tool
+    async def chat_reply(from_id: str, text: str, thread: str | None = None, reply_to: str | None = None) -> dict:
+        """Answer the human in a chat thread: `root` for the root session, the agent's
+        own id for a dispatched agent. reply_to is the id of the message you answer."""
+        check_event_agent(from_id)
+        if not text or not text.strip():
+            raise WhiteboardToolError("text must not be empty")
+        thread = (thread or "").strip() or ("root" if from_id in ROOT_IDS else from_id)
+        ev = record(
+            from_id, None, "chat", text,
+            data={"from": from_id, "to": "user", "thread": thread, "reply_to": reply_to},
+        )
+        return {"message": chat_message_from_event(ev), "seq": ev.seq}
 
     # -- dispatch -------------------------------------------------------------
     @tool

@@ -26,7 +26,7 @@ PENDING_EMITTERS = {
     "diagram rejected: ",
     "agent plan edited: ",
     "agent diagram edited: ",
-    "acknowledged plan edit (event ",
+    # "acknowledged plan edit (event " — emitted by report_progress(ack_event_seq=) since A.S3.
 }
 
 #: v2 tools the root session is responsible for calling — they must be named in SKILL.md.
