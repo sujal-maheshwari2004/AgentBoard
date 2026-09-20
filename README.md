@@ -30,7 +30,7 @@ git clone <this repo> ~/AgentBoard
 cd ~/AgentBoard
 uv sync                                   # Python env (.venv)
 cd canvas && pnpm install && pnpm build   # optional: rebuild canvas/dist
-cd .. && make install-skill               # symlinks skill/whiteboard -> ~/.claude/skills/whiteboard
+cd .. && make install-skill               # symlinks the skill dir + copies the two agent definitions
 ```
 
 The checkout location is `AGENTBOARD_HOME` (default `~/AgentBoard`). The skill and the per-project
@@ -51,8 +51,13 @@ In any project, in an interactive Claude Code session, say **"enter whiteboard m
 4. `POST /api/session`: points the server's push bridge at this session's inbox socket;
 5. `whiteboard register`: `claude mcp add --transport http --scope project whiteboard <url>/mcp`
    (idempotent; writes `.mcp.json`);
-6. opens the canvas in your browser and prints one JSON line
-   `{url, mcp_url, port, first_registration, scaffolded}`.
+6. installs `~/.claude/agents/whiteboard-task.md` and `whiteboard-liaison.md` as stamped
+   copies (never symlinks) of `templates/agents/`;
+7. opens the canvas in your browser and prints one JSON line
+   `{url, mcp_url, port, first_registration, scaffolded, project, session_project,`
+   `session_project_matches, inbound_ok, inbound_scope, inbound_sources, agents_installed,`
+   `fix_hint, warnings}`. The script never writes `~/.claude/settings.json`: when the inbound
+   setting is missing it prints a one-line `fix_hint` for you to run (see `docs/RUNBOOK.md` §2.1).
 
 **First run:** the MCP server was just registered, so Claude will ask you to run `/mcp` (or
 restart Claude Code) to connect it. Until `mcp__whiteboard__status` works, nothing else proceeds.
