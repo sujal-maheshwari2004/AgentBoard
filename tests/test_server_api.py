@@ -68,6 +68,50 @@ def test_events_backfill(client: TestClient) -> None:
     assert [e["seq"] for e in client.get("/api/events").json()["events"]] == [1, 2, 3, 4, 5]
 
 
+def test_threads_endpoints(client: TestClient) -> None:
+    log = client.app_ref.state.log  # type: ignore[attr-defined]
+    log.append(agent_id="user", node_id=None, type="chat", note="hi root",
+               data={"from": "user", "to": "root", "thread": "root"})
+    log.append(agent_id="root", node_id=None, type="chat", note="hi back",
+               data={"from": "root", "to": "user", "thread": "root", "reply_to": "chat-1"})
+    log.append(agent_id="user", node_id="node-a", type="chat", note="status?",
+               data={"from": "user", "to": "agent-parser", "thread": "agent-parser"})
+    log.append(agent_id="root", node_id=None, type="info", note="not chat")
+
+    body = client.get("/api/threads").json()
+    assert set(body["threads"]) == {"root", "agent-parser"}
+    assert body["threads"]["root"]["count"] == 2 and body["threads"]["root"]["last_seq"] == 2
+    assert body["threads"]["root"]["last_ts"].endswith("Z")
+    assert body["threads"]["agent-parser"] == {
+        "count": 1, "last_seq": 3, "last_ts": body["threads"]["agent-parser"]["last_ts"],
+    }
+
+    thread = client.get("/api/threads/root").json()
+    assert thread["thread"] == "root" and thread["latest_seq"] == 2
+    assert [m["id"] for m in thread["messages"]] == ["chat-1", "chat-2"]
+    assert thread["messages"][1]["reply_to"] == "chat-1" and thread["messages"][1]["from"] == "root"
+
+    after = client.get("/api/threads/root?since=1").json()
+    assert [m["seq"] for m in after["messages"]] == [2] and after["latest_seq"] == 2
+    capped = client.get("/api/threads/root?since=0&limit=1").json()
+    assert [m["seq"] for m in capped["messages"]] == [1] and capped["latest_seq"] == 1
+    empty = client.get("/api/threads/agent-zz?since=7").json()
+    assert empty == {"thread": "agent-zz", "messages": [], "latest_seq": 7}
+
+
+def test_health_agents_list(client: TestClient) -> None:
+    store = client.app_ref.state.store  # type: ignore[attr-defined]
+    store.upsert_agent("agent-a", "node-a")
+    store.touch_agent("agent-a", activity="parsing", progress=2.0, metrics={"tool_calls": 7})
+    body = client.get("/api/health").json()
+    assert body["agent_count"] == 1 and len(body["agents"]) == 1
+    row = body["agents"][0]
+    assert set(row) == {"id", "assigned_node", "status", "activity", "progress",
+                        "spawned_at", "heartbeat_at", "finished_at", "metrics"}
+    assert row["id"] == "agent-a" and row["activity"] == "parsing"
+    assert row["progress"] == 1.0 and row["metrics"] == {"tool_calls": 7}
+
+
 def test_session_retarget(client: TestClient, tmp_path: Path) -> None:
     sock = tmp_path / "cc.sock"
     r = client.post("/api/session", json={"socket": str(sock), "token": "tok"})
