@@ -27,7 +27,7 @@ from typing import Any, Protocol
 from mcp.server import MCPServer
 from mcp.server.mcpserver.exceptions import ToolError
 
-from whiteboard.events.log import EventLog
+from whiteboard.events.log import EventLog, now_iso
 from whiteboard.files.frontmatter import split_frontmatter
 from whiteboard.liaison import fetch_peer_node, fetch_skeleton
 from whiteboard.plan.graph import Graph
@@ -487,7 +487,9 @@ def build_mcp_server(store: PlanStore, log: EventLog, bus: Bus, root: Path) -> M
         """Record the handle (SendMessage target) of the subagent just spawned for
         agent_id; appends the `spawned` event. Call it right after the Agent tool returns."""
         need_agent(agent_id)
-        card = store.set_agent_ref(agent_id, claude_agent_ref, spawned_at)
+        # Default the start clock to now: the canvas derives an agent's elapsed time from
+        # spawned_at, so a null here means the card can never show how long the run has taken.
+        card = store.set_agent_ref(agent_id, claude_agent_ref, spawned_at or now_iso())
         publish_store()
         where = f" on {card.assigned_node}" if card.assigned_node else ""
         record(

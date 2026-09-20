@@ -849,3 +849,15 @@ def test_guard_result_leaves_small_results_alone() -> None:
     out = guard_result(huge)
     assert out["truncated"] is True and out["text"] == "t" * 10
     assert out["nodes"][0]["body"].endswith("[truncated]")
+
+
+async def test_set_agent_ref_defaults_spawned_at(h: Harness) -> None:
+    """The canvas derives elapsed time from spawned_at, so omitting it must not
+    leave the clock unset (found by driving a live server)."""
+    await h.call("upsert_node", id="node-a", title="A")
+    await h.call("upsert_agent", agent_id="agent-a", assigned_node="node-a")
+    card = await h.call("set_agent_ref", agent_id="agent-a", claude_agent_ref="handle-1")
+    assert card["spawned_at"] and card["spawned_at"].endswith("Z")
+    explicit = await h.call("set_agent_ref", agent_id="agent-a", claude_agent_ref="handle-2",
+                            spawned_at="2026-01-01T00:00:00.000Z")
+    assert explicit["spawned_at"] == "2026-01-01T00:00:00.000Z"
