@@ -8,7 +8,7 @@ import unicodedata
 from pathlib import Path
 from typing import Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 NodeType = Literal["hld", "lld", "er"]
 NodeStatus = Literal["todo", "in_progress", "blocked", "done"]
@@ -26,7 +26,19 @@ NODE_FRONTMATTER_KEYS: tuple[str, ...] = (
 )
 AGENT_FRONTMATTER_KEYS: tuple[str, ...] = (
     "id", "assigned_node", "status", "claude_agent_ref", "ready_deps", "spawned_at",
+    "activity", "progress", "heartbeat_at", "finished_at", "metrics",
 )
+#: Live monitoring fields: they are only written to `card.md` when set, so a
+#: card that was never monitored keeps the six original keys byte for byte.
+LIVE_AGENT_FIELDS: tuple[str, ...] = (
+    "activity", "progress", "heartbeat_at", "finished_at", "metrics",
+)
+#: Cumulative, all optional. See docs/CONTRACTS.md §1.
+AGENT_METRIC_KEYS: tuple[str, ...] = (
+    "elapsed_s", "tool_calls", "files_touched", "tokens_in", "tokens_out", "cost_usd",
+)
+#: `metrics["files_touched"]` is deduped and capped at this many entries.
+FILES_TOUCHED_MAX = 200
 
 
 def validate_node_id(id: str) -> str:
@@ -224,6 +236,52 @@ class Edge(BaseModel):
     diagram: str = "hld"
 
 
+class AgentDiagram(BaseModel):
+    """The parsed first mermaid fence of `agents/<id>/diagrams.md`.
+
+    Box ids here are free-form (component/class/table names), unlike the plan
+    boards, whose boxes are always node ids.
+    """
+
+    model_config = ConfigDict(extra="ignore")
+
+    mermaid: str = ""
+    direction: str = "TD"
+    nodes: list[dict] = Field(default_factory=list)
+    edges: list[dict] = Field(default_factory=list)
+    error: str | None = None
+
+
+def parse_agent_diagram(diagrams_md: str | None) -> AgentDiagram | None:
+    """Parse the first mermaid fence of an agent's `diagrams.md`.
+
+    `None` when the text holds no fence at all. A parse error is *captured* in
+    `.error` (with the raw text in `.mermaid`) and never raised: a half-written
+    agent diagram must not break the card it is attached to.
+    """
+    text = diagrams_md or ""
+    if not text.strip():
+        return None
+    # lazy: whiteboard.mermaid imports nothing from this module, but the plan
+    # models must stay importable without the parser.
+    from whiteboard.mermaid import MermaidError, extract_mermaid_blocks, parse, serialize
+
+    blocks = extract_mermaid_blocks(text)
+    if not blocks:
+        return None
+    inner = blocks[0][2]
+    try:
+        doc = parse(inner)
+    except MermaidError as exc:
+        return AgentDiagram(mermaid=inner, error=str(exc))
+    return AgentDiagram(
+        mermaid=serialize(doc),
+        direction=doc.direction,
+        nodes=[{"id": n.id, "label": n.label if n.label is not None else n.id} for n in doc.nodes.values()],
+        edges=[{"src": e.src, "dst": e.dst, "label": e.label} for e in doc.edges],
+    )
+
+
 class AgentCard(BaseModel):
     model_config = ConfigDict(extra="forbid", validate_assignment=True)
 
@@ -233,10 +291,28 @@ class AgentCard(BaseModel):
     claude_agent_ref: str | None = None
     ready_deps: list[str] = Field(default_factory=list)
     spawned_at: str | None = None
+    # live monitoring (CONTRACTS §1): written to card.md only when set
+    activity: str | None = None
+    progress: float | None = None
+    heartbeat_at: str | None = None
+    finished_at: str | None = None
+    metrics: dict = Field(default_factory=dict)
     notes: str = ""
     plan_md: str = ""
     diagrams_md: str = ""
+    #: derived from `diagrams_md`; never part of the frontmatter, never written
+    diagram: AgentDiagram | None = None
     extra: dict = Field(default_factory=dict)
+
+    @model_validator(mode="before")
+    @classmethod
+    def _derive_diagram(cls, data: Any) -> Any:
+        """`diagram` is a projection of `diagrams_md`, recomputed on every
+        validation (a supplied value is ignored)."""
+        if isinstance(data, dict):
+            data = dict(data)
+            data["diagram"] = parse_agent_diagram(data.get("diagrams_md"))
+        return data
 
     @field_validator("id")
     @classmethod
@@ -255,7 +331,7 @@ class AgentCard(BaseModel):
     def _coerce_ref(cls, v: Any) -> str | None:
         return None if _none_like(v) else str(v)
 
-    @field_validator("spawned_at", mode="before")
+    @field_validator("spawned_at", "heartbeat_at", "finished_at", mode="before")
     @classmethod
     def _coerce_spawned(cls, v: Any) -> str | None:
         if _none_like(v):
@@ -263,6 +339,36 @@ class AgentCard(BaseModel):
         if hasattr(v, "isoformat"):
             return v.isoformat()
         return str(v)
+
+    @field_validator("activity", mode="before")
+    @classmethod
+    def _coerce_activity(cls, v: Any) -> str | None:
+        return None if v is None else str(v)
+
+    @field_validator("progress", mode="before")
+    @classmethod
+    def _clamp_progress(cls, v: Any) -> float | None:
+        if _none_like(v):
+            return None
+        return min(1.0, max(0.0, float(v)))
+
+    @field_validator("metrics", mode="before")
+    @classmethod
+    def _coerce_metrics(cls, v: Any) -> dict:
+        if v is None:
+            return {}
+        metrics = dict(v)
+        files = metrics.get("files_touched")
+        if files is not None:
+            if isinstance(files, str):
+                files = [files]
+            out: list[str] = []
+            for item in files:
+                s = str(item)
+                if s and s not in out:
+                    out.append(s)
+            metrics["files_touched"] = out[:FILES_TOUCHED_MAX]
+        return metrics
 
     @field_validator("ready_deps", mode="before")
     @classmethod
@@ -280,7 +386,10 @@ class AgentCard(BaseModel):
         return {} if v is None else dict(v)
 
     def frontmatter(self) -> dict:
-        """Ordered card frontmatter: id, assigned_node, status, claude_agent_ref, ready_deps, spawned_at, then extra keys."""
+        """Ordered card frontmatter: id, assigned_node, status, claude_agent_ref,
+        ready_deps, spawned_at, then whichever of the five live monitoring keys
+        (activity, progress, heartbeat_at, finished_at, metrics) are set, then
+        extra keys. An unmonitored card is byte-identical to a v1 one."""
         meta: dict[str, Any] = {
             "id": self.id,
             "assigned_node": self.assigned_node,
@@ -289,6 +398,11 @@ class AgentCard(BaseModel):
             "ready_deps": list(self.ready_deps),
             "spawned_at": self.spawned_at,
         }
+        for key in LIVE_AGENT_FIELDS:
+            value = getattr(self, key)
+            if value is None or value == {}:
+                continue
+            meta[key] = dict(value) if isinstance(value, dict) else value
         for k, v in self.extra.items():
             if k not in meta:
                 meta[k] = v
@@ -301,10 +415,10 @@ class AgentCard(BaseModel):
         """Tolerant constructor from card.md frontmatter + body (notes) and sibling files."""
         meta = dict(meta or {})
         fields: dict[str, Any] = {"id": meta.pop("id", None)}
-        for key in ("assigned_node", "status", "claude_agent_ref", "ready_deps", "spawned_at"):
+        for key in AGENT_FRONTMATTER_KEYS[1:]:
             if key in meta:
                 val = meta.pop(key)
-                if key == "status" and _none_like(val):
+                if key in ("status", "metrics") and _none_like(val):
                     continue
                 fields[key] = val
         fields["extra"] = meta
@@ -393,8 +507,10 @@ def node_ready(node: Node, nodes: dict[str, Node]) -> bool:
 
 
 __all__ = [
-    "AGENT_FRONTMATTER_KEYS", "AGENT_ID_RE", "AGENT_STATUSES", "AgentCard", "AgentStatus",
-    "Diagram", "Edge", "Event", "NODE_FRONTMATTER_KEYS", "NODE_ID_RE", "NODE_STATUSES",
-    "NODE_TYPES", "Node", "NodeStatus", "NodeType", "PlanSnapshot", "Skeleton",
-    "interface_text", "node_ready", "slugify", "validate_agent_id", "validate_node_id",
+    "AGENT_FRONTMATTER_KEYS", "AGENT_ID_RE", "AGENT_METRIC_KEYS", "AGENT_STATUSES",
+    "AgentCard", "AgentDiagram", "AgentStatus", "Diagram", "Edge", "Event",
+    "FILES_TOUCHED_MAX", "LIVE_AGENT_FIELDS", "NODE_FRONTMATTER_KEYS", "NODE_ID_RE",
+    "NODE_STATUSES", "NODE_TYPES", "Node", "NodeStatus", "NodeType", "PlanSnapshot",
+    "Skeleton", "interface_text", "node_ready", "parse_agent_diagram", "slugify",
+    "validate_agent_id", "validate_node_id",
 ]

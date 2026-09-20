@@ -42,6 +42,7 @@ import json
 import logging
 import os
 import re
+import time
 import uuid
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -66,6 +67,7 @@ from whiteboard.plan.graph import Graph, diagram_from_nodes
 from whiteboard.plan.jobspec import render_plan_md
 from whiteboard.plan.model import (
     AGENT_STATUSES,
+    LIVE_AGENT_FIELDS,
     NODE_STATUSES,
     NODE_TYPES,
     AgentCard,
@@ -81,7 +83,10 @@ from whiteboard.plan.model import (
 from whiteboard.plan.risk import NodeSemantics, classify_ops, describe, diff_node, is_risky, op_kind
 from whiteboard.scaffold import TEMPLATES_DIR
 
-__all__ = ["PlanStore", "OpsResult", "ServerMessage", "DiagramState", "BOARDS", "CACHE_VERSION"]
+__all__ = [
+    "PlanStore", "OpsResult", "ServerMessage", "DiagramState", "BOARDS", "CACHE_VERSION",
+    "CARD_WRITE_INTERVAL_S", "EXTERNAL_DIFF_MAX_CHARS",
+]
 
 log = logging.getLogger(__name__)
 
@@ -92,6 +97,11 @@ DIAGRAM_NAME_RE = re.compile(r"^[a-z0-9][a-z0-9-]*$")
 #: The three canvas boards, in display order. Other ``plan/*.md`` diagrams sort
 #: alphabetically after them.
 BOARDS: tuple[str, ...] = ("hld", "lld", "er")
+#: A heartbeat rewrites ``card.md`` at most this often *per agent*; in between,
+#: the card is only updated in memory and broadcast (CONTRACTS §4).
+CARD_WRITE_INTERVAL_S = 5.0
+#: Unified diffs shipped in an ``event.external`` payload are capped here.
+EXTERNAL_DIFF_MAX_CHARS = 4000
 _UNSET: Any = object()
 
 
@@ -185,6 +195,10 @@ class PlanStore:
         self.last_messages: list[ServerMessage] = []
         self.writes = 0
         self._loaded = False
+        # heartbeat bookkeeping: cards changed in memory but not yet on disk,
+        # and when each card was last written (monotonic seconds).
+        self._dirty_cards: set[str] = set()
+        self._card_written_at: dict[str, float] = {}
 
     # ------------------------------------------------------------------ paths
     def _rel(self, path: Path) -> str:
@@ -800,6 +814,37 @@ class PlanStore:
         self.last_messages = msgs
         return msgs
 
+    #: ``field`` -> the file under ``agents/<id>/`` that holds it.
+    _AGENT_FIELD_FILES = {"plan_md": "plan.md", "diagrams_md": "diagrams.md"}
+
+    def agent_field_diff(self, agent_id: str, field: str, old: str, new: str) -> tuple[str, str]:
+        """``(unified diff capped at EXTERNAL_DIFF_MAX_CHARS, first changed line)``
+        for one of an agent's text files. The second element is a ≤120-char
+        summary suitable for a push line."""
+        rel = f".whiteboard/agents/{agent_id}/{self._AGENT_FIELD_FILES.get(field, field)}"
+        diff = "".join(
+            difflib.unified_diff(
+                (old or "").splitlines(keepends=True),
+                (new or "").splitlines(keepends=True),
+                fromfile=f"a/{rel}",
+                tofile=f"b/{rel}",
+            )
+        )
+        if len(diff) > EXTERNAL_DIFF_MAX_CHARS:
+            marker = "\n… (diff truncated)\n"
+            diff = diff[: EXTERNAL_DIFF_MAX_CHARS - len(marker)] + marker
+        first = ""
+        for line in diff.splitlines():
+            if line.startswith("+") and not line.startswith("+++") and line[1:].strip():
+                first = line[1:].strip()
+                break
+        if not first:
+            for line in diff.splitlines():
+                if line.startswith("-") and not line.startswith("---") and line[1:].strip():
+                    first = f"removed {line[1:].strip()}"
+                    break
+        return diff, first[:120]
+
     def _external_agent(self, agent_id: str, path: Path) -> list[ServerMessage]:
         folder = self._agent_dir(agent_id)
         if not (folder / "card.md").exists():
@@ -810,13 +855,34 @@ class PlanStore:
             self._mark_invalid(folder / "card.md", str(exc))
             return [self._external_msg(path, f"invalid agent card: {exc}", False, kind="agent", ids=[agent_id], error=str(exc))]
         self.invalid.pop(self._rel(folder / "card.md"), None)
-        if self.agents.get(agent_id) == card:
+        old = self.agents.get(agent_id)
+        if old is not None and path.name != "card.md":
+            # A hand-edited card.md wins, but a plan/diagram edit must not lose
+            # live fields that a heartbeat has not flushed to disk yet.
+            card = card.model_copy(update={k: getattr(old, k) for k in LIVE_AGENT_FIELDS})
+        if old == card:
             return []
         self.agents[agent_id] = card
         self._regen_plan_md()
         self.rev += 1
         self._save_cache()
-        self.last_messages = [self._agent_upsert_msg(card)]
+        msgs = [self._agent_upsert_msg(card)]
+        field = {"plan.md": "plan_md", "diagrams.md": "diagrams_md"}.get(path.name)
+        if field is not None and old is not None:
+            diff, first = self.agent_field_diff(agent_id, field, getattr(old, field), getattr(card, field))
+            what = "plan" if field == "plan_md" else "diagram"
+            msgs.append(
+                self._external_msg(
+                    path,
+                    f"agent {what} edited: {agent_id} — {first}",
+                    False,
+                    kind="agent",
+                    ids=[agent_id],
+                    field=field,
+                    diff=diff,
+                )
+            )
+        self.last_messages = msgs
         return list(self.last_messages)
 
     # ------------------------------------------------------------ canvas ops
@@ -1121,8 +1187,20 @@ class PlanStore:
 
     @staticmethod
     def _default_diagrams_md(agent_id: str, node_id: str | None) -> str:
-        target = f"`{node_id}`" if node_id else "this agent's node"
-        return f"# Diagrams: {agent_id}\n\nOptional LLD diagrams for {target}; add ```mermaid blocks here.\n"
+        """A real (empty) fence, so ``write_agent_diagram`` and the canvas both
+        have a block to replace from the first write on."""
+        target = node_id or "this agent's node"
+        return (
+            f"# Diagrams: {agent_id}\n"
+            "\n"
+            f"The LLD for {f'`{node_id}`' if node_id else 'this agent'}: one box per module, class "
+            "or table. Refresh it with `write_agent_diagram` before you report `done`.\n"
+            "\n"
+            "```mermaid\n"
+            "flowchart TD\n"
+            f"    %% components of {target}; box ids are free-form\n"
+            "```\n"
+        )
 
     def _write_agent(self, card: AgentCard) -> None:
         folder = self._agent_dir(card.id)
@@ -1133,6 +1211,8 @@ class PlanStore:
     def _commit_agent(self, card: AgentCard) -> AgentCard:
         self._write_agent(card)
         self.agents[card.id] = card
+        self._dirty_cards.discard(card.id)
+        self._card_written_at[card.id] = time.monotonic()
         self._regen_plan_md()
         self.rev += 1
         self._save_cache()
@@ -1173,12 +1253,114 @@ class PlanStore:
             claude_agent_ref=claude_agent_ref if claude_agent_ref is not None else (existing.claude_agent_ref if existing else None),
             ready_deps=ready,
             spawned_at=existing.spawned_at if existing else None,
+            # live monitoring fields are carried over: a plan or diagram
+            # rewrite must never drop a heartbeat.
+            **({k: getattr(existing, k) for k in LIVE_AGENT_FIELDS} if existing else {}),
             notes=notes if notes is not None else (existing.notes if existing else "Optional notes.\n"),
             plan_md=plan_md if plan_md is not None else (existing.plan_md if existing and existing.plan_md else self._default_plan_md(id, assigned_node)),
             diagrams_md=diagrams_md if diagrams_md is not None else (existing.diagrams_md if existing and existing.diagrams_md else self._default_diagrams_md(id, assigned_node)),
             extra=dict(existing.extra) if existing else {},
         )
         return self._commit_agent(card)
+
+    def write_agent_diagram(self, id: str, mermaid: str) -> AgentCard:
+        """Replace the first mermaid fence of ``agents/<id>/diagrams.md`` (or
+        append one). Box ids are free-form — this is the agent's own LLD, not a
+        plan board. Raises ``ValueError`` on invalid mermaid."""
+        card = self.agents.get(id)
+        if card is None:
+            raise ValueError(f"unknown agent {id!r}")
+        try:
+            parse(mermaid)
+        except MermaidError as exc:
+            raise ValueError(f"invalid mermaid: {exc}") from exc
+        text = card.diagrams_md or self._default_diagrams_md(id, card.assigned_node)
+        return self.upsert_agent(id, None, diagrams_md=replace_mermaid_block(text, 0, mermaid))
+
+    # ------------------------------------------------- live monitoring
+    def touch_agent(
+        self,
+        id: str,
+        *,
+        activity: str | None = None,
+        progress: float | None = None,
+        metrics: dict | None = None,
+        files_touched: list[str] | None = None,
+        finished: bool = False,
+        now: str | None = None,
+    ) -> AgentCard:
+        """The lightweight heartbeat path (CONTRACTS §4): update the card in
+        memory, broadcast it, and write ``card.md`` at most once every
+        :data:`CARD_WRITE_INTERVAL_S` per agent. It never bumps ``rev``,
+        regenerates ``PLAN.md`` or writes the cache."""
+        card = self.agents.get(id)
+        if card is None:
+            raise ValueError(f"unknown agent {id!r}")
+        ts = now or now_iso()
+        merged = dict(card.metrics)
+        merged.update(metrics or {})
+        if files_touched:
+            files = list(merged.get("files_touched") or [])
+            files += [f for f in (str(x) for x in files_touched) if f and f not in files]
+            merged["files_touched"] = files
+        update: dict[str, Any] = {"heartbeat_at": ts, "metrics": merged}
+        if activity is not None:
+            update["activity"] = str(activity)
+        if progress is not None:
+            update["progress"] = min(1.0, max(0.0, float(progress)))
+        if finished:
+            update["finished_at"] = ts
+        new_card = AgentCard.model_validate({**card.model_dump(), **update})
+        self.agents[id] = new_card
+        self._dirty_cards.add(id)
+        self._maybe_write_card(id)
+        self.last_messages = [self._agent_upsert_msg(new_card)]
+        return new_card
+
+    def _maybe_write_card(self, id: str, *, force: bool = False) -> bool:
+        """Write ``agents/<id>/card.md`` when it is due; returns whether it was."""
+        card = self.agents.get(id)
+        if card is None:
+            self._dirty_cards.discard(id)
+            return False
+        last = self._card_written_at.get(id)
+        if not force and last is not None and (time.monotonic() - last) < CARD_WRITE_INTERVAL_S:
+            return False
+        self._write(self._agent_dir(id) / "card.md", _render_card(card), fsync=False)
+        self._card_written_at[id] = time.monotonic()
+        self._dirty_cards.discard(id)
+        return True
+
+    def flush_dirty_cards(self, force: bool = False) -> list[str]:
+        """Write the cards touched since the last flush; returns the ids written."""
+        return [aid for aid in sorted(self._dirty_cards) if self._maybe_write_card(aid, force=force)]
+
+    def finalize_agent(
+        self,
+        id: str,
+        *,
+        tokens_in: int | None = None,
+        tokens_out: int | None = None,
+        cost_usd: float | None = None,
+        duration_s: float | None = None,
+    ) -> AgentCard:
+        """The end of a run: merge the final metrics, stamp ``finished_at`` and
+        commit the card in full (one ``rev`` bump, PLAN.md regenerated)."""
+        card = self.agents.get(id)
+        if card is None:
+            raise ValueError(f"unknown agent {id!r}")
+        metrics = dict(card.metrics)
+        for key, value in (
+            ("tokens_in", tokens_in), ("tokens_out", tokens_out),
+            ("cost_usd", cost_usd), ("elapsed_s", duration_s),
+        ):
+            if value is not None:
+                metrics[key] = value
+        ts = now_iso()
+        final = AgentCard.model_validate({
+            **card.model_dump(), "metrics": metrics, "finished_at": ts, "heartbeat_at": ts,
+        })
+        return self._commit_agent(final)
 
     def set_agent_status(self, id: str, status: str) -> AgentCard:
         card = self.agents.get(id)

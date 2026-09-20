@@ -8,7 +8,7 @@ import pytest
 from whiteboard.files.atomic import SelfWriteRegistry
 from whiteboard.files.watcher import debounce_worker, start_observer, stop_observer
 from whiteboard.mermaid import extract_mermaid_blocks
-from whiteboard.plan.store import PlanStore
+from whiteboard.plan.store import EXTERNAL_DIFF_MAX_CHARS, PlanStore
 from whiteboard.scaffold import scaffold
 
 
@@ -266,14 +266,77 @@ def test_external_agent_card_edits(root: Path, store: PlanStore) -> None:
     msgs = _change(store, card)
     assert _types(msgs) == ["agent.card.upsert"] and msgs[0]["payload"]["agent"]["status"] == "blocked"
     assert store.get_agent("agent-b").status == "blocked"
+    # a card.md edit stays silent: only plan.md / diagrams.md raise an
+    # event.external the root has to act on.
+    assert "event.external" not in _types(msgs)
+
     plan = _wb(root) / "agents" / "agent-b" / "plan.md"
     plan.write_text("# rewritten spec\n")
     msgs = _change(store, plan)
-    assert _types(msgs) == ["agent.card.upsert"] and store.get_agent("agent-b").plan_md == "# rewritten spec\n"
+    assert _types(msgs) == ["agent.card.upsert", "event.external"]
+    assert store.get_agent("agent-b").plan_md == "# rewritten spec\n"
+    payload = msgs[1]["payload"]
+    assert payload["kind"] == "agent" and payload["ids"] == ["agent-b"]
+    assert payload["field"] == "plan_md" and payload["risky"] is False
+    assert payload["summary"] == "agent plan edited: agent-b — # rewritten spec"
+    assert payload["path"] == ".whiteboard/agents/agent-b/plan.md"
+    assert "--- a/.whiteboard/agents/agent-b/plan.md" in payload["diff"]
+    assert "+# rewritten spec" in payload["diff"]
+
+    diagrams = _wb(root) / "agents" / "agent-b" / "diagrams.md"
+    diagrams.write_text("# D\n\n```mermaid\nflowchart TD\n    Parser[Parser] --> Ast\n```\n")
+    msgs = _change(store, diagrams)
+    assert _types(msgs) == ["agent.card.upsert", "event.external"]
+    assert msgs[1]["payload"]["field"] == "diagrams_md"
+    assert msgs[1]["payload"]["summary"].startswith("agent diagram edited: agent-b — ")
+    # the parsed agent diagram rides along on the card
+    card_payload = msgs[0]["payload"]["agent"]
+    assert [n["id"] for n in card_payload["diagram"]["nodes"]] == ["Parser", "Ast"]
+
     card.unlink()
     assert _change(store, card) == [{"type": "agent.card.delete", "payload": {"id": "agent-b"}}]
     assert store.get_agent("agent-b") is None
     assert "agent-b" not in (_wb(root) / "PLAN.md").read_text()
+
+
+def test_external_agent_diagram_parse_error_is_tolerated(root: Path, store: PlanStore) -> None:
+    store.upsert_agent("agent-b", "node-b")
+    diagrams = _wb(root) / "agents" / "agent-b" / "diagrams.md"
+    diagrams.write_text("# D\n\n```mermaid\nflowchart TD\n    A[[[\n```\n")
+    msgs = _change(store, diagrams)
+    assert _types(msgs) == ["agent.card.upsert", "event.external"]
+    card = store.get_agent("agent-b")
+    assert card.diagram is not None and card.diagram.error and card.diagram.nodes == []
+    assert store.invalid == {}  # a broken agent diagram never invalidates the card
+
+
+def test_external_agent_diff_is_capped(root: Path, store: PlanStore) -> None:
+    store.upsert_agent("agent-b", "node-b")
+    plan = _wb(root) / "agents" / "agent-b" / "plan.md"
+    plan.write_text("".join(f"line {i} of a very long rewritten job spec\n" for i in range(500)))
+    msgs = _change(store, plan)
+    diff = msgs[1]["payload"]["diff"]
+    assert len(diff) == EXTERNAL_DIFF_MAX_CHARS and diff.endswith("… (diff truncated)\n")
+    assert msgs[1]["payload"]["summary"] == "agent plan edited: agent-b — line 0 of a very long rewritten job spec"
+
+
+def test_external_plan_edit_keeps_unflushed_heartbeat(root: Path, store: PlanStore) -> None:
+    store.upsert_agent("agent-b", "node-b")
+    store.touch_agent("agent-b", activity="reading", progress=0.5, metrics={"tool_calls": 9})
+    assert store._dirty_cards == {"agent-b"}  # not on disk yet
+    plan = _wb(root) / "agents" / "agent-b" / "plan.md"
+    plan.write_text("# rewritten spec\n")
+    msgs = _change(store, plan)
+    card = store.get_agent("agent-b")
+    assert card.plan_md == "# rewritten spec\n"
+    assert card.activity == "reading" and card.progress == 0.5 and card.metrics == {"tool_calls": 9}
+    assert msgs[0]["payload"]["agent"]["activity"] == "reading"
+    # a hand-edited card.md, by contrast, wins over the in-memory live fields
+    card_path = _wb(root) / "agents" / "agent-b" / "card.md"
+    card_path.write_text(card_path.read_text().replace("status: idle", "status: working"))
+    _change(store, card_path)
+    assert store.get_agent("agent-b").status == "working"
+    assert store.get_agent("agent-b").activity is None  # never written to disk
 
 
 def test_external_edits_survive_reload(root: Path, store: PlanStore) -> None:

@@ -17,9 +17,13 @@ def test_render_job_spec_sections_and_content():
     files, parser, store = nodes()
     md = render_job_spec(parser, deps=[files], dependents=[store], project_root=Path("/proj"))
     for heading in ["## Goal", "## Your node file path", "## Status protocol", "## Interfaces you must provide",
-                    "## Interfaces you consume", "## Dependents waiting on you", "## Scope rules", "## Read first"]:
+                    "## Interfaces you consume", "## Dependents waiting on you",
+                    "## Diagrams you must produce", "## Scope rules", "## Read first"]:
         assert heading in md, heading
     assert md.index("## Goal") < md.index("## Your node file path") < md.index("## Status protocol")
+    assert md.index("## Dependents waiting on you") < md.index("## Diagrams you must produce") < md.index("## Scope rules")
+    assert "write_agent_diagram(agent_id=<your agent id>" in md and "write_agent_plan(agent_id=<your agent id>" in md
+    assert "report_progress(agent_id=<your agent id>" in md and "box ids there are free-form" in md
     assert "Mermaid parser" in md and "Parse flowcharts." in md and "Keep passthrough verbatim." in md
     assert "`/proj/.whiteboard/plan/nodes/node-parser.md`" in md
     assert 'set_agent_status(agent_id=<your agent id>, status="working")' in md

@@ -7,7 +7,7 @@ from whiteboard.files.atomic import SelfWriteRegistry
 from whiteboard.files.frontmatter import split_frontmatter
 from whiteboard.mermaid import extract_mermaid_blocks, parse
 from whiteboard.plan.model import AgentCard, PlanSnapshot, Skeleton
-from whiteboard.plan.store import OpsResult, PlanStore
+from whiteboard.plan.store import CARD_WRITE_INTERVAL_S, OpsResult, PlanStore
 from whiteboard.scaffold import scaffold
 
 
@@ -527,7 +527,12 @@ def test_upsert_agent_creates_folder(root: Path, chain: PlanStore) -> None:
     )
     assert (folder / "plan.md").read_text().startswith("# Job spec: node-b")
     assert "node-example" not in (folder / "plan.md").read_text()
-    assert (folder / "diagrams.md").read_text().startswith("# Diagrams: agent-b")
+    diagrams_md = (folder / "diagrams.md").read_text()
+    assert diagrams_md.startswith("# Diagrams: agent-b")
+    assert extract_mermaid_blocks(diagrams_md)[0][2] == (
+        "flowchart TD\n    %% components of node-b; box ids are free-form\n"
+    )
+    assert card.diagram is not None and card.diagram.nodes == []
     assert "| `agent-b` | `node-b` | idle | — |" in (_wb(root) / "PLAN.md").read_text()
     assert chain.last_messages == [{"type": "agent.card.upsert", "payload": {"agent": card.model_dump(mode="json")}}]
 
@@ -589,6 +594,114 @@ def test_delete_agent(root: Path, chain: PlanStore) -> None:
     assert not (_wb(root) / "agents" / "agent-b").exists()
     assert chain.get_agent("agent-b") is None
     assert chain.last_messages == [{"type": "agent.card.delete", "payload": {"id": "agent-b"}}]
+
+
+def test_write_agent_diagram(root: Path, chain: PlanStore) -> None:
+    chain.upsert_agent("agent-b", "node-b")
+    mermaid = "flowchart LR\n    Lexer[Lexer] -->|tokens| Parser[Parser]\n"
+    card = chain.write_agent_diagram("agent-b", mermaid)
+    path = _wb(root) / "agents" / "agent-b" / "diagrams.md"
+    assert path.read_text().startswith("# Diagrams: agent-b")
+    assert extract_mermaid_blocks(path.read_text())[0][2] == mermaid
+    # free-form box ids are fine here and no plan node was created
+    assert card.diagram is not None and card.diagram.direction == "LR"
+    assert [n["id"] for n in card.diagram.nodes] == ["Lexer", "Parser"]
+    assert card.diagram.edges == [{"src": "Lexer", "dst": "Parser", "label": "tokens"}]
+    assert chain.get_node("node-lexer") is None and "Lexer" not in _hld_inner(root)
+    assert chain.last_messages[0]["payload"]["agent"]["diagram"]["direction"] == "LR"
+
+    # a second write replaces the same fence; the prose around it survives
+    chain.upsert_agent("agent-b", None, diagrams_md="# D\n\nprose\n\n```mermaid\nflowchart TD\n    A\n```\n")
+    again = chain.write_agent_diagram("agent-b", "flowchart TD\n    B[Two]\n")
+    assert again.diagrams_md == "# D\n\nprose\n\n```mermaid\nflowchart TD\n    B[Two]\n```\n"
+    # a file with no fence at all gets one appended
+    chain.upsert_agent("agent-b", None, diagrams_md="# D\n\njust prose\n")
+    appended = chain.write_agent_diagram("agent-b", "flowchart TD\n    C\n")
+    assert appended.diagrams_md.endswith("```mermaid\nflowchart TD\n    C\n```\n")
+
+    with pytest.raises(ValueError, match="invalid mermaid"):
+        chain.write_agent_diagram("agent-b", "flowchart TD\n    A[[[\n")
+    with pytest.raises(ValueError, match="unknown agent"):
+        chain.write_agent_diagram("agent-zzz", "flowchart TD\n")
+
+
+def test_upsert_agent_keeps_live_fields(chain: PlanStore) -> None:
+    chain.upsert_agent("agent-b", "node-b")
+    chain.touch_agent("agent-b", activity="reading", progress=0.25, metrics={"tool_calls": 2})
+    card = chain.upsert_agent("agent-b", None, plan_md="# rewritten\n")
+    assert card.plan_md == "# rewritten\n"
+    assert card.activity == "reading" and card.progress == 0.25
+    assert card.metrics == {"tool_calls": 2} and card.heartbeat_at
+
+
+def test_touch_agent_is_lightweight(root: Path, chain: PlanStore) -> None:
+    chain.upsert_agent("agent-b", "node-b")
+    card_path = _wb(root) / "agents" / "agent-b" / "card.md"
+    plan_md_before = (_wb(root) / "PLAN.md").read_text()
+    cache_before = (_wb(root) / ".cache" / "last_good.json").read_text()
+    rev, writes = chain.rev, chain.writes
+
+    # the card was just committed, so the first heartbeat is throttled
+    first = chain.touch_agent("agent-b", activity="reading node-b")
+    assert first.activity == "reading node-b" and first.heartbeat_at
+    assert chain.writes == writes and chain._dirty_cards == {"agent-b"}
+    assert chain.last_messages == [{"type": "agent.card.upsert", "payload": {"agent": first.model_dump(mode="json")}}]
+
+    # pretend the last write was long ago: exactly one card.md write
+    chain._card_written_at["agent-b"] = chain._card_written_at["agent-b"] - CARD_WRITE_INTERVAL_S - 1
+    chain.touch_agent("agent-b", activity="writing tests", progress=0.5, metrics={"tool_calls": 3})
+    assert chain.writes == writes + 1 and chain._dirty_cards == set()
+    assert "activity: writing tests" in card_path.read_text()
+
+    # and the next ones are throttled again
+    merged = chain.touch_agent(
+        "agent-b", metrics={"tokens_in": 10}, files_touched=["a.py", "a.py"], progress=3.0
+    )
+    chain.touch_agent("agent-b", files_touched=["a.py", "b.py"])
+    assert chain.writes == writes + 1
+    assert merged.progress == 1.0  # clamped
+    final = chain.get_agent("agent-b")
+    assert final.metrics == {"tool_calls": 3, "tokens_in": 10, "files_touched": ["a.py", "b.py"]}
+    assert final.activity == "writing tests"  # not reset by a metrics-only beat
+
+    # nothing heavy happened: no rev bump, no PLAN.md regen, no cache write
+    assert chain.rev == rev
+    assert (_wb(root) / "PLAN.md").read_text() == plan_md_before
+    assert (_wb(root) / ".cache" / "last_good.json").read_text() == cache_before
+
+    assert chain.flush_dirty_cards() == []  # still inside the interval
+    assert chain.flush_dirty_cards(force=True) == ["agent-b"]
+    assert chain.flush_dirty_cards(force=True) == []  # nothing dirty any more
+    assert chain.rev == rev
+
+    finished = chain.touch_agent("agent-b", activity="done", finished=True)
+    assert finished.finished_at == finished.heartbeat_at
+    chain.flush_dirty_cards(force=True)
+
+    fresh = PlanStore(root)
+    fresh.load()
+    assert fresh.get_agent("agent-b") == chain.get_agent("agent-b")
+    with pytest.raises(ValueError, match="unknown agent"):
+        chain.touch_agent("agent-zzz")
+
+
+def test_finalize_agent_full_commit(root: Path, chain: PlanStore) -> None:
+    chain.upsert_agent("agent-b", "node-b")
+    chain.touch_agent("agent-b", activity="wrapping up", metrics={"tool_calls": 7})
+    rev = chain.rev
+    card = chain.finalize_agent("agent-b", tokens_in=100, tokens_out=20, cost_usd=0.5, duration_s=42.0)
+    assert card.finished_at and card.heartbeat_at == card.finished_at
+    assert card.metrics == {"tool_calls": 7, "tokens_in": 100, "tokens_out": 20, "cost_usd": 0.5, "elapsed_s": 42.0}
+    assert chain.rev == rev + 1  # exactly one bump
+    assert chain._dirty_cards == set()
+    text = (_wb(root) / "agents" / "agent-b" / "card.md").read_text()
+    assert "finished_at:" in text and "tokens_in: 100" in text
+    assert chain.last_messages == [{"type": "agent.card.upsert", "payload": {"agent": card.model_dump(mode="json")}}]
+    fresh = PlanStore(root)
+    fresh.load()
+    assert fresh.get_agent("agent-b") == card
+    with pytest.raises(ValueError, match="unknown agent"):
+        chain.finalize_agent("agent-zzz")
 
 
 # ---------------------------------------------------------------- layout

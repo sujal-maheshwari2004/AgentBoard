@@ -93,6 +93,17 @@ def render_job_spec(
         "",
         _bullets(dependent_lines, "- (none)") if dependent_lines else "- (none)",
         "",
+        "## Diagrams you must produce",
+        "",
+        f"- Before you report `done`, refresh the LLD for `{node.id}`: "
+        "`mcp__whiteboard__write_agent_diagram(agent_id=<your agent id>, mermaid=...)`.",
+        "- One box per module, class or table you actually built; box ids there are free-form "
+        "(they are your components, not plan node ids).",
+        "- If the design deviates from this spec, rewrite it with "
+        "`mcp__whiteboard__write_agent_plan(agent_id=<your agent id>, plan_md=...)` so the canvas shows the truth.",
+        "- Report at every milestone: "
+        "`mcp__whiteboard__report_progress(agent_id=<your agent id>, activity=..., progress=0.0-1.0)`.",
+        "",
         "## Scope rules",
         "",
         "- Only touch paths relevant to this node.",
