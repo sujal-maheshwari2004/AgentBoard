@@ -127,6 +127,15 @@ def test_pending_emitters_only_shrinks() -> None:
     assert PENDING_EMITTERS <= set(PREFIXES)
 
 
+def test_contracts_section_8_lists_every_tool() -> None:
+    """§8 is the tool contract: the table and the server must name the same 28 tools."""
+    from tests.test_mcp_tools import CONTRACT_TOOLS
+
+    section = _section(CONTRACTS, "## 8. MCP tools")
+    names = set(re.findall(r"^\| `([a-z_]+)` \|", section, re.M))
+    assert names == CONTRACT_TOOLS and len(names) == 28
+
+
 @pytest.mark.parametrize("tool", ROOT_V2_TOOLS)
 def test_skill_names_every_v2_root_tool(tool: str) -> None:
     assert tool in SKILL, f"SKILL.md never tells root about {tool}"
