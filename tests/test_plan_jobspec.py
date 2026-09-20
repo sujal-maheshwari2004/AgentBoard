@@ -43,6 +43,67 @@ def test_render_job_spec_empty_lists_and_custom_paths():
     assert "(no dependencies)" in md and "(none)" in md and "(none declared" in md
 
 
+V2_SECTIONS = ["## Progress reporting", "## Chat", "## If your plan changes"]
+
+
+def test_render_job_spec_has_the_v2_sections_in_order():
+    files, parser, store = nodes()
+    md = render_job_spec(parser, deps=[files], dependents=[store], project_root=Path("/proj"))
+    for heading in V2_SECTIONS:
+        assert heading in md, heading
+    positions = [md.index(h) for h in V2_SECTIONS]
+    assert positions == sorted(positions)
+    # they sit between "Dependents waiting on you" and "Scope rules"
+    assert md.index("## Dependents waiting on you") < positions[0]
+    assert positions[-1] < md.index("## Scope rules")
+    # the diagram section is owned by the server area; when it lands it belongs in the same block
+    if "## Diagrams you must produce" in md:
+        assert md.index("## Dependents waiting on you") < md.index("## Diagrams you must produce") < positions[0]
+
+    assert "report_progress(" in md and 'metrics={"tool_calls"' in md and "files_touched=" in md
+    assert "Never report progress you have not made." in md
+    assert "do not send them" in md  # tokens/cost belong to the root session
+    assert "chat_reply(" in md and "Your final message is not a reply" in md
+    assert "write_agent_plan(" in md and "ack_event_seq=N" in md
+
+
+def test_render_job_spec_stops_without_the_mcp_tools():
+    files, parser, store = nodes()
+    md = render_job_spec(parser, deps=[files], dependents=[store], project_root=Path("/proj"))
+    assert "If the `mcp__whiteboard__*` tools are not available in your session, stop immediately" in md
+    assert "say which tool is missing" in md
+
+
+def test_render_job_spec_is_self_sufficient_for_general_purpose():
+    files, parser, store = nodes()
+    md = render_job_spec(parser, deps=[files], dependents=[store], project_root=Path("/proj"),
+                         agent_id="agent-parser")
+    assert "<your agent id>" not in md
+    assert 'set_agent_status(agent_id="agent-parser", status="working")' in md
+    assert 'append_event(agent_id="agent-parser", node_id="node-parser", type="done"' in md
+    assert 'ask_user(agent_id="agent-parser"' in md
+    assert 'report_progress(agent_id="agent-parser"' in md
+    assert 'chat_reply(from_id="agent-parser"' in md
+    assert 'write_agent_plan(agent_id="agent-parser"' in md
+    assert "/proj/.whiteboard/agents/agent-parser/plan.md" in md
+
+
+def test_render_job_spec_without_agent_id_keeps_placeholder():
+    files, parser, store = nodes()
+    md = render_job_spec(parser, deps=[files], dependents=[store], project_root=Path("/proj"))
+    assert 'set_agent_status(agent_id=<your agent id>, status="working")' in md
+    assert "agent_id=<your agent id>" in md
+    assert '"agent-parser"' not in md
+
+
+def test_render_job_spec_forbids_board_writes():
+    files, parser, store = nodes()
+    md = render_job_spec(parser, deps=[files], dependents=[store], project_root=Path("/proj"),
+                         agent_id="agent-parser")
+    assert "write_diagram(" not in md.replace("write_agent_diagram(", "")
+    assert "plan/hld.md" not in md and "plan/lld.md" not in md and "plan/er.md" not in md
+
+
 def test_render_plan_md():
     files, parser, store = nodes()
     agents = {"agent-parser": AgentCard(id="agent-parser", assigned_node="node-parser", status="working", ready_deps=["node-files"])}

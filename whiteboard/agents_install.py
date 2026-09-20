@@ -55,6 +55,10 @@ def render_agent_definition(name: str, templates_dir: Path | None = None) -> str
 def installed_state(dest: Path, wanted: str) -> str:
     """`missing` | `unchanged` | `stale` | `user-modified` for the file at `dest`."""
     dest = Path(dest)
+    if dest.is_symlink():
+        # Never ours and never acceptable: a symlink is exactly the failure mode this module
+        # exists to remove, so it is always replaced by a real copy.
+        return STALE
     try:
         current = dest.read_text(encoding="utf-8")
     except (FileNotFoundError, NotADirectoryError, IsADirectoryError, UnicodeDecodeError, OSError):
