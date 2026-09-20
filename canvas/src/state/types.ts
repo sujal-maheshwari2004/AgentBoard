@@ -24,6 +24,26 @@ export interface PlanEdge {
   diagram: string
 }
 
+/** §4 `AgentCard.metrics` — cumulative, every key optional (A.5) */
+export interface AgentMetrics {
+  elapsed_s?: number
+  tool_calls?: number
+  /** a deduped list on the server (capped 200); tolerated as a plain count too */
+  files_touched?: string[] | number
+  tokens_in?: number
+  tokens_out?: number
+  cost_usd?: number
+}
+
+/** §4 `AgentDiagram` — the parsed first mermaid fence of `agents/<id>/diagrams.md` (A.3) */
+export interface AgentDiagram {
+  mermaid: string
+  direction?: string
+  nodes?: Array<{ id: string; label?: string }>
+  edges?: Array<{ src: string; dst: string; label?: string | null }>
+  error?: string | null
+}
+
 export interface AgentCard {
   id: string
   assigned_node: string | null
@@ -31,9 +51,17 @@ export interface AgentCard {
   claude_agent_ref?: string | null
   ready_deps: string[]
   spawned_at?: string | null
+  /** live monitoring (A.5): present only once the agent reports */
+  activity?: string | null
+  progress?: number | null
+  heartbeat_at?: string | null
+  finished_at?: string | null
+  metrics?: AgentMetrics
   notes?: string
   plan_md?: string
   diagrams_md?: string
+  /** derived server-side from `diagrams_md`; never written back */
+  diagram?: AgentDiagram | null
 }
 
 export interface PlanEvent {
@@ -143,6 +171,10 @@ export interface ClientPayloads {
   'risky_edit.reply': { request_id: string; approved: boolean; note: string }
   'plan.relayout': { diagram: string }
   'node.status': { id: string; status: NodeStatus }
+  /** B.6: the folder's plan textarea, debounced 800ms (A.6 `on_agent_plan_edit`) */
+  'agent.plan.edit': { agent_id: string; plan_md: string }
+  /** B.6: the folder's mermaid editor; a parse error comes back as `edit.reject` */
+  'agent.diagram.edit': { agent_id: string; mermaid: string }
 }
 export type ClientMessageType = keyof ClientPayloads
 

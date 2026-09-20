@@ -3,7 +3,10 @@
     "delayMs": 1500,
     "message": {
       "type": "bridge.status",
-      "payload": { "ok": true, "failures": 0 }
+      "payload": {
+        "ok": true,
+        "failures": 0
+      }
     }
   },
   {
@@ -11,7 +14,14 @@
     "message": {
       "type": "event.append",
       "event": true,
-      "payload": { "agent_id": "root", "node_id": "node-plan", "type": "info", "note": "dispatching plan core next", "notified": [], "data": {} }
+      "payload": {
+        "agent_id": "root",
+        "node_id": "node-plan",
+        "type": "info",
+        "note": "dispatching plan core next",
+        "notified": [],
+        "data": {}
+      }
     }
   },
   {
@@ -19,7 +29,18 @@
     "message": {
       "type": "plan.node.upsert",
       "payload": {
-        "node": { "id": "node-plan", "type": "hld", "title": "Plan core", "status": "in_progress", "owner": "agent-plan", "depends_on": ["node-files"], "interfaces": [], "body": "" }
+        "node": {
+          "id": "node-plan",
+          "type": "hld",
+          "title": "Plan core",
+          "status": "in_progress",
+          "owner": "agent-plan",
+          "depends_on": [
+            "node-files"
+          ],
+          "interfaces": [],
+          "body": ""
+        }
       }
     }
   },
@@ -28,7 +49,38 @@
     "message": {
       "type": "agent.card.upsert",
       "payload": {
-        "agent": { "id": "agent-parser", "assigned_node": "node-parser", "status": "working", "claude_agent_ref": "parser-2", "ready_deps": ["node-files"], "spawned_at": "2026-09-20T00:05:00.000Z", "notes": "writing the tokenizer", "plan_md": "", "diagrams_md": "" }
+        "agent": {
+          "id": "agent-parser",
+          "assigned_node": "node-parser",
+          "status": "working",
+          "claude_agent_ref": "parser-1",
+          "ready_deps": [
+            "node-files"
+          ],
+          "spawned_at": "2026-09-20T00:14:00.000Z",
+          "activity": "tokenizing the fence header",
+          "progress": 0.68,
+          "heartbeat_at": "2026-09-20T00:15:30.000Z",
+          "finished_at": null,
+          "metrics": {
+            "elapsed_s": 90,
+            "tool_calls": 16,
+            "files_touched": [
+              "whiteboard/mermaid.py",
+              "tests/test_mermaid.py",
+              "docs/CONTRACTS.md",
+              "whiteboard/plan/store.py",
+              "templates/lld.md",
+              "README.md"
+            ],
+            "tokens_in": 35800,
+            "tokens_out": 9100,
+            "cost_usd": 0.42
+          },
+          "notes": "writing the tokenizer",
+          "plan_md": "# Job: node-parser\n\nImplement parse/serialize.\n\n## Deliverables\n- parse(text) -> MermaidDoc\n- serialize(doc) -> str\n",
+          "diagrams_md": "# Diagrams\n\n```mermaid\nflowchart TD\n    lexer --> parser\n    parser --> doc\n    doc --> serializer\n```\n"
+        }
       }
     }
   },
@@ -42,7 +94,11 @@
         "node_id": "node-parser",
         "question": "Keep ELK out of the layout engine and use dagre only?",
         "kind": "choice",
-        "choices": ["yes, dagre only", "no, add ELK", "let me think"]
+        "choices": [
+          "yes, dagre only",
+          "no, add ELK",
+          "let me think"
+        ]
       }
     }
   },

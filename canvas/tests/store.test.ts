@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import snapshotFixture from './fixtures/protocol/snapshot.json'
-import { TICKER_LIMIT, createStore, initialState, reduce, type StoreState } from '../src/state/store'
+import { CLOCK_INTERVAL_MS, TICKER_LIMIT, anyAgentLive, createStore, initialState, isAgentLive, reduce, type StoreState, type StoreTimers } from '../src/state/store'
 import { SERVER_MESSAGE_TYPES, type PlanSnapshot, type ServerMessage } from '../src/state/types'
 
 const snap = snapshotFixture as unknown as PlanSnapshot
@@ -153,5 +153,70 @@ describe('createStore', () => {
     const before = n
     s.selectAgent(null)
     expect(n).toBe(before)
+  })
+})
+
+// ---- B.11 pattern 7: ONE 1s clock, armed only while an agent is live ----
+
+function fakeTimers(): StoreTimers & { fire(): void; armed: number; cleared: number } {
+  let tick: (() => void) | null = null
+  let t = 1_000_000
+  const timers = {
+    armed: 0,
+    cleared: 0,
+    setInterval(fn: () => void, ms: number) {
+      expect(ms).toBe(CLOCK_INTERVAL_MS)
+      timers.armed++
+      tick = fn
+      return 'h'
+    },
+    clearInterval() {
+      timers.cleared++
+      tick = null
+    },
+    now: () => t,
+    fire() {
+      t += CLOCK_INTERVAL_MS
+      tick?.()
+    },
+  }
+  return timers
+}
+
+describe('the shared nowMs clock', () => {
+  it('knows which agents are live', () => {
+    expect(isAgentLive({ id: 'a', assigned_node: null, status: 'working', ready_deps: [] })).toBe(true)
+    expect(isAgentLive({ id: 'a', assigned_node: null, status: 'blocked', ready_deps: [] })).toBe(true)
+    expect(isAgentLive({ id: 'a', assigned_node: null, status: 'idle', ready_deps: [] })).toBe(false)
+    expect(isAgentLive({ id: 'a', assigned_node: null, status: 'done', ready_deps: [] })).toBe(false)
+    // a finished agent is never live, whatever its status still says
+    expect(isAgentLive({ id: 'a', assigned_node: null, status: 'working', ready_deps: [], finished_at: 'x' })).toBe(false)
+    expect(anyAgentLive({})).toBe(false)
+  })
+
+  it('arms one interval on the first live agent and clears it when the last one finishes', () => {
+    const timers = fakeTimers()
+    const s = createStore(initialState(), timers)
+    // the fixture ships one working agent (agent-parser), so the snapshot alone arms the clock
+    s.dispatch(msg('plan.snapshot', snap))
+    expect(timers.armed).toBe(1)
+    const t0 = s.getState().nowMs
+    timers.fire()
+    expect(s.getState().nowMs).toBe(t0 + CLOCK_INTERVAL_MS)
+
+    // a second live agent does not arm a second interval
+    s.dispatch(msg('agent.card.upsert', { agent: { ...snap.agents[0], status: 'working' as const, finished_at: null } }))
+    expect(timers.armed).toBe(1)
+
+    s.dispatch(msg('agent.card.upsert', { agent: { ...snap.agents[1], status: 'done' as const } }))
+    expect(timers.cleared).toBe(0) // agent-files is still working
+    s.dispatch(msg('agent.card.delete', { id: 'agent-files' }))
+    expect(timers.cleared).toBe(1)
+
+    // and it re-arms for the next live agent
+    s.dispatch(msg('agent.card.upsert', { agent: { ...snap.agents[1], status: 'working' as const } }))
+    expect(timers.armed).toBe(2)
+    s.stopClock()
+    expect(timers.cleared).toBe(2)
   })
 })

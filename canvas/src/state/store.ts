@@ -36,6 +36,12 @@ export interface StoreState {
   bridge: BridgeStatus | null
   socket: SocketStatus
   selectedAgentId: string | null
+  /**
+   * The one shared clock every elapsed readout reads (B.1 pattern 7 / B.11): a single 1s
+   * interval, armed only while some agent is live and cleared the moment none is. Shapes never
+   * call `Date.now()` themselves.
+   */
+  nowMs: number
   lastSeq: number
   lastAck: { forSeq: number; rev: number } | null
   lastReject: { forSeq: number; reason: string; seq: number } | null
@@ -62,11 +68,22 @@ export function initialState(): StoreState {
     bridge: null,
     socket: 'connecting',
     selectedAgentId: null,
+    nowMs: Date.now(),
     lastSeq: 0,
     lastAck: null,
     lastReject: null,
     lastError: null,
   }
+}
+
+/** an agent whose clock must tick: running (or waiting) and not finished (Temporal's rule) */
+export function isAgentLive(agent: AgentCard): boolean {
+  if (agent.finished_at) return false
+  return agent.status === 'working' || agent.status === 'blocked'
+}
+
+export function anyAgentLive(agents: Record<string, AgentCard>): boolean {
+  return Object.values(agents).some(isAgentLive)
 }
 
 /** the board a fresh snapshot lands on: `hld` when present, else the first board diagram */
@@ -216,12 +233,49 @@ export interface Store {
   removeDispatch(requestId: string): void
   removeRiskyEdit(requestId: string): void
   note(kind: string, text: string): void
+  /** stop the `nowMs` interval (unmount / tests); it re-arms on the next live agent */
+  stopClock(): void
 }
 
-export function createStore(init: StoreState = initialState()): Store {
+export interface StoreTimers {
+  setInterval(fn: () => void, ms: number): unknown
+  clearInterval(handle: unknown): void
+  now(): number
+}
+
+const defaultTimers: StoreTimers = {
+  setInterval: (fn, ms) => {
+    const h = setInterval(fn, ms)
+    // node (tests, SSR) must not be held open by the canvas clock; browsers return a number
+    ;(h as unknown as { unref?: () => void }).unref?.()
+    return h
+  },
+  clearInterval: (h) => clearInterval(h as ReturnType<typeof setInterval>),
+  now: () => Date.now(),
+}
+
+export const CLOCK_INTERVAL_MS = 1000
+
+export function createStore(init: StoreState = initialState(), timers: StoreTimers = defaultTimers): Store {
   let state = init
   const listeners = new Set<() => void>()
   const emit = () => listeners.forEach((l) => l())
+  let clock: unknown = null
+  /**
+   * Bind the ticker to liveness (Temporal/Prefect): arm one interval when an agent is live,
+   * tear it down the moment none is. Called after every state change that can touch `agents`.
+   */
+  const syncClock = () => {
+    const live = anyAgentLive(state.agents)
+    if (live && clock === null) {
+      // no emit here: arming is invisible, the first tick 1s later is what re-renders
+      state = { ...state, nowMs: timers.now() }
+      clock = timers.setInterval(() => store.set({ nowMs: timers.now() }), CLOCK_INTERVAL_MS)
+    } else if (!live && clock !== null) {
+      timers.clearInterval(clock)
+      clock = null
+    }
+  }
   const store: Store = {
     getState: () => state,
     subscribe(listener) {
@@ -234,6 +288,8 @@ export function createStore(init: StoreState = initialState()): Store {
         state = next
         emit()
       }
+      // only these three can change whether anything is live (B.11)
+      if (msg.type === 'agent.card.upsert' || msg.type === 'agent.card.delete' || msg.type === 'plan.snapshot') syncClock()
     },
     set(patch) {
       const p = typeof patch === 'function' ? patch(state) : patch
@@ -257,6 +313,12 @@ export function createStore(init: StoreState = initialState()): Store {
     },
     removeRiskyEdit(requestId) {
       store.set((s) => ({ riskyEdits: s.riskyEdits.filter((r) => r.request_id !== requestId) }))
+    },
+    stopClock() {
+      if (clock !== null) {
+        timers.clearInterval(clock)
+        clock = null
+      }
     },
     note(kind, text) {
       store.set((s) => ({
